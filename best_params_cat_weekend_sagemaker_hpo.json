@@ -1,0 +1,13 @@
+{
+  "iterations": 380,
+  "learning_rate": 0.07,
+  "depth": 6,
+  "l2_leaf_reg": 5,
+  "bagging_temperature": 0.80,
+  "min_data_in_leaf": 20,
+  "loss_function": "MAE",
+  "eval_metric": "MAPE",
+  "random_seed": 42,
+  "thread_count": -1,
+  "allow_writing_files": false
+}

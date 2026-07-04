@@ -1,0 +1,14 @@
+{
+  "n_estimators": 380,
+  "learning_rate": 0.07,
+  "max_depth": 5,
+  "num_leaves": 16,
+  "subsample": 0.5,
+  "colsample_bytree": 0.4,
+  "min_child_samples": 90,
+  "reg_alpha": 45.0,
+  "reg_lambda": 35.0,
+  "objective": "regression",
+  "n_jobs": -1,
+  "random_state": 42
+}

@@ -1,0 +1,32 @@
+# ── Veri / çıktı / log (OneDrive-senkronlu, git dışı) ─────────────────────────
+data/
+output/
+logs/
+
+# ── models/: sadece DİREKT çocukları yok say ──────────────────────────────────
+# NOT: 'models/' (dizin) yerine 'models/*' (içerik) ZORUNLU — git, ebeveyn dizini
+# tümden yok sayılırsa içindeki dosyayı '!' ile geri alamaz.
+# Yok sayılan: live_* (günlük eğitilen), archive/ (run snapshot'ları),
+#              chronos_lora_turkforecast/ (19 MB donmuş adapter).
+# İzlenen (re-include): donmuş kalibrasyon artefaktları — çıktıyı etkiler, versiyon geçmişine girmeli.
+models/*
+!models/holiday_blend_alphas.json
+!models/holiday_blend_alphas_t2.json
+!models/pv_bias_lookup.json
+!models/pv_bias_lookup_t2.json
+!models/stacking_ridge.joblib
+!models/stacking_ridge_chronos.joblib
+!models/stacking_meta_model.joblib
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# ── Geçici / OS ───────────────────────────────────────────────────────────────
+*.tmp
+Thumbs.db
+.DS_Store
