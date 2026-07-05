@@ -27,6 +27,28 @@ MODEL_ARCHIVE_DIR    = MODELS_DIR / "archive"   # her run'ın modelleri: archive
 RUN_CONTEXT_PATH     = DATA_DIR / "run_context.json"
 ARCHIVE_RETENTION_DAYS = 90
 
+# ── Forecast/actuals log deposu (Faz 0) ────────────────────────────────────────
+# OneDrive DIŞI: parquet append + DuckDB tek-dosya, OneDrive senkronuyla aynı
+# anda yazılırsa kilitlenme/bozulma riski var. Bu yüzden canlı log verisi
+# %LOCALAPPDATA% altında (senkronlanmıyor); OneDrive'a sadece günlük zip yedeği
+# gider (LOG_BACKUP_DIR, aşağıda — proje dizini altında, git-ignored).
+LOG_ROOT           = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "adm_live_logs"
+FORECAST_LOG_DIR   = LOG_ROOT / "forecast_log"
+ACTUALS_LOG_DIR    = LOG_ROOT / "actuals_log"
+MONITORING_DB      = LOG_ROOT / "monitoring.duckdb"    # türetilmiş, parquet'ten rebuild edilebilir
+KNOWN_EVENTS_CSV   = LOG_ROOT / "known_events.csv"     # Faz 2'de aktifleşir
+LOG_BACKUP_DIR     = LOGS_DIR / "backup"                # OneDrive altı — günlük zip yedeği
+
+# ── daily_scorecard (Faz 1) ────────────────────────────────────────────────────
+# Tasarım: stlf_faz1_scorecard_tasarim.md §1 (K1-K5).
+HEADLINE_HORIZON            = "T+2"    # 06_deliver'ın müşteriye teslim ettiği gün (roadmap §1.1)
+SCORECARD_REBUILD_WINDOW_DAYS = 400    # her run'da trailing kaç gün yeniden hesaplanır
+SCORECARD_WINDOWS           = (7, 30, 365)   # window_report pencereleri
+Z_THRESHOLD                 = 3.0      # robust_z alarm eşiği
+Z_BASELINE_WINDOW_DAYS       = 30      # median/MAD pencere genişliği
+Z_WARMUP_MIN_DAYS           = 30       # bu kadar temiz gün dolmadan 'warmup' modu (mutlak p95 eşik)
+ALERTS_DIR                  = LOGS_DIR / "alerts"   # z>3 / kapsam eksikliği -> <target_date>.json
+
 MASTER_PARQUET   = DATA_DIR / "master.parquet"
 WEATHER_HISTORY_PARQUET = DATA_DIR / "weather_history.parquet"
 WEATHER_FC_PARQUET = DATA_DIR / "weather_cache" / "weather_fc_live.parquet"

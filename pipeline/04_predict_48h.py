@@ -10,6 +10,7 @@ Giriş:  data/weather_cache/feature_matrix.parquet
 """
 
 import sys
+import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -26,10 +27,14 @@ from config_live import (
     MODEL_XGB_WD_SAT, MODEL_XGB_WE, MODEL_STACKER_PATH,
     CHRONOS_MODEL_ID, CHRONOS_ADAPTER_PATH, CHRONOS_CONTEXT_LENGTH,
     CHRONOS_FORCE_CPU, CHRONOS_USE_COVARIATES,
+    WEATHER_STATIONS,
 )
 
 FEATURE_MATRIX_PATH   = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
 RAW_PREDICTIONS_PATH  = DATA_DIR / "weather_cache" / "raw_predictions.parquet"
+RAW_PREDICTIONS_META_PATH = DATA_DIR / "weather_cache" / "raw_predictions_meta.json"
+
+WX_TEMP_COLS = [f"{s}_app_temp_actual" for s in WEATHER_STATIONS]
 
 
 def _add_local_src_path():
@@ -293,8 +298,49 @@ def predict_chronos(feature_df, train_idx, all_pred_idx, n_steps) -> pd.Series:
 
 # ── Stacking ─────────────────────────────────────────────────────────────────
 
-def stack_predictions(preds: dict, predict_idx) -> pd.Series:
-    """Rolling Ridge (OOF) → frozen stacker → basit ortalama."""
+_META_FIELD_MAP = {
+    "XGB_Pred": "meta_w_xgb", "LGBM_Pred": "meta_w_lgbm",
+    "CAT_Pred": "meta_w_cat", "CHRONOS_Pred": "meta_w_chronos",
+}
+
+
+def _weights_meta(cols: list, coefs, intercept=None) -> dict:
+    """Ridge .coef_ / basit ortalama ağırlıkları -> forecast_log meta_w_* alanları."""
+    meta = {v: None for v in _META_FIELD_MAP.values()}
+    for c, w in zip(cols, coefs):
+        field = _META_FIELD_MAP.get(c)
+        if field and w is not None:
+            meta[field] = float(w)
+    meta["meta_intercept"] = float(intercept) if intercept is not None else None
+    return meta
+
+
+def _safe_frozen_meta(stacker: dict, meta_model, meta_cols: list) -> dict:
+    """Frozen stacker ağırlıklarını loglamak için — meta_model her zaman sklearn
+    Ridge değil (örn. StaticWeightedEnsemble: .coef_/.intercept_ yok, ağırlıklar
+    stacker["best_weights"] dict'inde). Bu fonksiyon ASLA raise etmez: burada
+    atılan bir hata, zaten başarıyla hesaplanmış ensemble tahminini (çağıran
+    kodun try/except'i yüzünden) sessizce basit ortalamaya düşürürdü."""
+    try:
+        weights = stacker.get("best_weights")
+        if isinstance(weights, dict) and weights:
+            return _weights_meta(list(weights.keys()), list(weights.values()))
+        coefs = getattr(meta_model, "coef_", None)
+        if coefs is not None:
+            intercept = getattr(meta_model, "intercept_", None)
+            return _weights_meta(meta_cols, coefs, intercept)
+    except Exception as e:
+        print(f"     [Stacker] Ağırlık meta bilgisi çıkarılamadı (tahmin etkilenmez): {e}")
+    return _weights_meta([], [])
+
+
+def stack_predictions(preds: dict, predict_idx) -> tuple:
+    """Rolling Ridge (OOF) → frozen stacker → basit ortalama.
+
+    Returns: (ensemble: pd.Series, meta_method: str, meta_weights: dict)
+    meta_weights her zaman meta_w_xgb/lgbm/cat/chronos/meta_intercept anahtarlarını
+    içerir (mevcut olmayanlar None) — forecast_log şemasına doğrudan yazılabilir.
+    """
     pred_df = pd.DataFrame(preds, index=predict_idx)
     pred_cols = list(preds.keys())
 
@@ -306,7 +352,8 @@ def stack_predictions(preds: dict, predict_idx) -> pd.Series:
             available = [c for c in pred_cols if c in pred_df.columns]
             ensemble = rolling.predict(pred_df[available].values)
             print(f"     [Stacker] Rolling Ridge (OOF) uygulandı")
-            return pd.Series(ensemble, index=predict_idx)
+            meta = _weights_meta(available, rolling.coef_, rolling.intercept_)
+            return pd.Series(ensemble, index=predict_idx), "rolling_ridge", meta
     except Exception as e:
         print(f"     [Stacker] Rolling Ridge yok: {e}")
 
@@ -322,48 +369,43 @@ def stack_predictions(preds: dict, predict_idx) -> pd.Series:
                 if len(available) == len(meta_cols):
                     ensemble = meta_model.predict(pred_df[meta_cols])
                     print(f"     [Stacker] Frozen Ridge ({stacker.get('best_method', '?')})")
-                    return pd.Series(ensemble, index=predict_idx)
+                    meta = _safe_frozen_meta(stacker, meta_model, meta_cols)
+                    return pd.Series(ensemble, index=predict_idx), "frozen_ridge", meta
                 else:
                     missing = set(meta_cols) - set(available)
                     print(f"     [Stacker] Eksik: {missing} → basit ortalama")
             elif hasattr(stacker, "predict"):
                 ensemble = stacker.predict(pred_df[pred_cols])
                 print(f"     [Stacker] Frozen stacker")
-                return pd.Series(ensemble, index=predict_idx)
+                meta = _weights_meta([], [])
+                return pd.Series(ensemble, index=predict_idx), "frozen_other", meta
         except Exception as e:
             print(f"     [Stacker] Uyarı: {e} → basit ortalama")
 
     # 3. Basit ortalama
     ensemble = pred_df[pred_cols].mean(axis=1)
     print("     [Stacker] Basit ortalama")
-    return ensemble
+    equal_w = 1.0 / len(pred_cols) if pred_cols else 0.0
+    meta = _weights_meta(pred_cols, [equal_w] * len(pred_cols))
+    return ensemble, "simple_mean", meta
 
 
 # ── Holiday override (CatBoost solo on weekday holidays) ─────────────────────
 
-def _apply_holiday_override(df: pd.DataFrame, preds: pd.Series) -> pd.Series:
-    """Tatil saatlerinde CatBoost solo tahminini kullan (Boray stacking_manager:421-454)."""
-    if "CAT_Pred" not in df.columns:
-        return preds
+def _apply_holiday_override(cat_preds: pd.Series, preds: pd.Series, is_weekday_holiday: np.ndarray) -> pd.Series:
+    """Tatil saatlerinde CatBoost solo tahminini kullan (Boray stacking_manager:421-454).
 
-    is_holiday = np.zeros(len(df), dtype=bool)
-    for col in ["Yilbasi", "Milli_Bayram", "Ramazan_Bayram", "Kurban_Bayram"]:
-        if col in df.columns:
-            is_holiday |= (df[col] == 1).to_numpy()
-
-    if isinstance(df.index, pd.DatetimeIndex):
-        dow = df.index.dayofweek.to_numpy()
-    else:
-        dow = np.zeros(len(df))
-
-    is_weekday_holiday = is_holiday & (dow < 5)
-
+    `is_weekday_holiday` dışarıdan, gerçek teslim saatinden (recon_datetime)
+    türetilen takvimden hesaplanıp verilmeli — feature_df/deliver_idx'in
+    Saat=0 satırlarında bir gün ileri kaymış kendi takvim kolonlarına
+    güvenilemez (bkz. compute_calendar_fields docstring'i).
+    """
     if not is_weekday_holiday.any():
         return preds
 
     out = preds.copy()
-    cat_preds = df["CAT_Pred"].to_numpy()
-    out.iloc[np.where(is_weekday_holiday)[0]] = cat_preds[is_weekday_holiday]
+    cat_arr = cat_preds.to_numpy()
+    out.iloc[np.where(is_weekday_holiday)[0]] = cat_arr[is_weekday_holiday]
     print(f"     [Override] {is_weekday_holiday.sum()} tatil saati CatBoost solo ile değiştirildi")
     return out
 
@@ -390,6 +432,7 @@ def run() -> dict:
     gbdt_preds = train_and_predict_gbdt(feature_df, train_idx, steps, feature_cols)
 
     # Chronos prediction
+    chronos_ok = True
     try:
         chronos_pred = predict_chronos(feature_df, train_idx, all_pred_idx, n_steps=n_total)
         gbdt_preds["CHRONOS_Pred"] = chronos_pred
@@ -398,35 +441,82 @@ def run() -> dict:
         print(f"     [Chronos] Uyarı: {e} — atlandı")
         import traceback; traceback.print_exc()
         gbdt_preds["CHRONOS_Pred"] = gbdt_preds["XGB_Pred"].loc[all_pred_idx]
+        chronos_ok = False
+
+    cat_present = "CAT_Pred" in gbdt_preds
 
     # Stacking
-    ensemble = stack_predictions(
+    ensemble, meta_method, meta_weights = stack_predictions(
         {k: v.loc[deliver_idx] for k, v in gbdt_preds.items()},
         deliver_idx
     )
+    ensemble_raw = ensemble.copy()
+
+    # ── Faz 0: log alanları (calendar/horizon/hava) ───────────────────────────
+    # DİKKAT: takvim/horizon alanları `deliver_idx` (DataManager'ın kendi index'i)
+    # ÜZERİNDEN DEĞİL, gerçek teslim saatini taşıyan `recon_datetime` (Tarih+Saat
+    # yeniden kurulan) üzerinden hesaplanır — deliver_idx, Saat=0 satırlarında
+    # bir gün ileri kayıyor (bkz. compute_calendar_fields docstring'i), o kaymayı
+    # buraya taşımamak için hizalama pozisyonel yapılır (`.to_numpy()`), index
+    # etiketine göre DEĞİL. Holiday override de bu yüzden bu takvimi kullanmalı —
+    # deliver_idx'in kendi Yilbasi/Milli_Bayram/... kolonlarına güvenmek override'ı
+    # hiç tetiklemiyordu (her zaman False), çünkü pred_df_full bu kolonları hiç
+    # içermiyordu.
+    _add_local_src_path()
+    from src.forecast_logger import compute_calendar_fields, compute_horizon_fields
+    from run_context import get_run_context
+
+    ctx = get_run_context()
+    recon_datetime = pd.DatetimeIndex(
+        feature_df.loc[deliver_idx, RAW_DATE_COL].values +
+        pd.to_timedelta(feature_df.loc[deliver_idx, RAW_HOUR_COL].values, unit="h")
+    )
+    calendar_fields = compute_calendar_fields(recon_datetime)
+    horizon_fields = compute_horizon_fields(recon_datetime, ctx["started_at"], TEST_SIZE)
 
     # Holiday override
-    pred_df_full = pd.DataFrame(
-        {k: v.loc[deliver_idx] for k, v in gbdt_preds.items()},
-        index=deliver_idx
-    )
-    ensemble = _apply_holiday_override(pred_df_full, ensemble)
+    is_weekday_holiday = (calendar_fields["day_type"].to_numpy() == "hafta_ici_tatil")
+    if cat_present:
+        ensemble = _apply_holiday_override(gbdt_preds["CAT_Pred"].loc[deliver_idx], ensemble, is_weekday_holiday)
+    override_delta = ensemble - ensemble_raw
 
     gbdt_preds["Ensemble_Pred"] = ensemble
+
+    wx_temp_cols = [c for c in WX_TEMP_COLS if c in feature_df.columns]
+    wx_temp_fcst = (feature_df.loc[deliver_idx, wx_temp_cols].mean(axis=1)
+                    if wx_temp_cols else pd.Series(np.nan, index=deliver_idx))
+    wx_ghi_fcst = (feature_df.loc[deliver_idx, "GHI_ADM_Weighted"]
+                   if "GHI_ADM_Weighted" in feature_df.columns else pd.Series(np.nan, index=deliver_idx))
 
     # Output
     result_df = pd.DataFrame(
         {k: v.loc[deliver_idx] for k, v in gbdt_preds.items()},
         index=deliver_idx
     )
-    result_df["Datetime"] = (
-        feature_df.loc[deliver_idx, RAW_DATE_COL].values +
-        pd.to_timedelta(feature_df.loc[deliver_idx, RAW_HOUR_COL].values, unit="h")
-    )
+    result_df["Ensemble_Pred_Raw"] = ensemble_raw
+    result_df["override_active"] = (override_delta != 0)
+    result_df["override_delta"] = override_delta
+    result_df["wx_temp_fcst"] = wx_temp_fcst.to_numpy()
+    result_df["wx_ghi_fcst"] = wx_ghi_fcst.to_numpy()
+    result_df["day_type"] = calendar_fields["day_type"].to_numpy()
+    result_df["flag_holiday"] = calendar_fields["flag_holiday"].to_numpy()
+    result_df["flag_bridge"] = calendar_fields["flag_bridge"].to_numpy()
+    result_df["flag_ramadan"] = calendar_fields["flag_ramadan"].to_numpy()
+    result_df["horizon_day"] = horizon_fields["horizon_day"].to_numpy()
+    result_df["lead_time_h"] = horizon_fields["lead_time_h"].to_numpy()
+    result_df["Datetime"] = recon_datetime
     result_df = result_df.reset_index(drop=True)
 
     RAW_PREDICTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     result_df.to_parquet(RAW_PREDICTIONS_PATH, index=False)
+
+    sidecar = {
+        "meta_method": meta_method,
+        "chronos_ok": chronos_ok,
+        "cat_present": cat_present,
+        **meta_weights,
+    }
+    RAW_PREDICTIONS_META_PATH.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"     Ensemble ortalama: {ensemble.mean():.1f} MWh  |  kayıt: {RAW_PREDICTIONS_PATH.name}")
 

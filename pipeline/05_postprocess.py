@@ -155,18 +155,26 @@ def run() -> dict:
     preds.index = predict_idx
     pre_mean = float(preds.mean())
 
+    after_sub = preds
     if ENABLE_HOLIDAY_SUBSTITUTION:
-        preds = apply_holiday_substitution(preds, feature_df, predict_idx)
+        after_sub = apply_holiday_substitution(preds, feature_df, predict_idx)
     else:
         print("     [HolidaySub] devre dışı")
+    subst_delta = (after_sub - preds).to_numpy()
 
+    after_pv = after_sub
     if ENABLE_PV_BIAS_CORRECTION:
-        preds = apply_pv_bias(preds, feature_df, predict_idx)
+        after_pv = apply_pv_bias(after_sub, feature_df, predict_idx)
     else:
         print("     [PVBias] devre dışı")
+    pv_bias_delta = (after_pv - after_sub).to_numpy()
 
+    preds = after_pv
     post_mean = float(preds.mean())
     result_df = raw_preds_df.copy()
+    result_df["subst_active"] = subst_delta != 0
+    result_df["subst_delta"] = subst_delta
+    result_df["pv_bias_delta"] = pv_bias_delta
     result_df["Final_Pred"] = preds.values
 
     POSTPROC_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -20,6 +20,8 @@ import streamlit as st
 from common import import_pipeline_step
 # common.py LIVE_DIR/src'i sys.path'e ekledi → run_context doğrudan import edilebilir.
 from run_context import start_run, archive_models, prune_archive, write_summary
+from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip
+from scorecard import build_daily_scorecard, check_alerts
 
 log = logging.getLogger("adm_live")  # handler'ları start_run() kurar
 
@@ -85,6 +87,26 @@ def _render_adm():
                         except Exception as arch_err:
                             log.warning(f"Model arşivleme hatası (tahmin etkilenmez): {arch_err}")
                             st.warning(f"⚠ Model arşivlenemedi: {arch_err}")
+
+                    # 06 başarılı → forecast_log yaz + DuckDB view + günlük yedek + scorecard/alarm.
+                    if step_name == "06_deliver":
+                        try:
+                            st.session_state["forecast_steps"]["forecast_log"] = write_forecast_log(ctx)
+                            rebuild_duckdb_views()
+                            backup_logs_zip()
+                        except Exception as log_err:
+                            log.warning(f"Forecast log yazımı hatası (teslimi etkilemez): {log_err}")
+                            st.warning(f"⚠ Forecast log yazılamadı: {log_err}")
+
+                        try:
+                            st.session_state["forecast_steps"]["scorecard"] = build_daily_scorecard()
+                            alerts = check_alerts()
+                            st.session_state["forecast_steps"]["alerts"] = {"count": len(alerts)}
+                            if alerts:
+                                st.warning(f"⚠ {len(alerts)} kötü-gün alarmı — logs/alerts/ altına bak")
+                        except Exception as sc_err:
+                            log.warning(f"Scorecard/alarm hatası (teslimi etkilemez): {sc_err}")
+                            st.warning(f"⚠ Scorecard hesaplanamadı: {sc_err}")
                 except Exception as e:
                     st.session_state["forecast_error"] = traceback.format_exc()
                     log.error(f"══ {step_name} HATA\n{traceback.format_exc()}")

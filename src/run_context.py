@@ -159,6 +159,13 @@ def archive_models(ctx: dict) -> dict:
 
     shutil.copy2(CONFIG_FILE, dest / "config_live.py")
 
+    # Feature snapshot (Faz 0 forecast_log `feature_snapshot_ref` alanını besler) —
+    # o run'ın tahmin ürettiği tam feature matrisi, debug/perfect-prog rerun için.
+    feature_snapshot_ref = None
+    if C.FEATURE_MATRIX_PATH.is_file():
+        shutil.copy2(C.FEATURE_MATRIX_PATH, dest / "feature_matrix.parquet")
+        feature_snapshot_ref = str(dest / "feature_matrix.parquet")
+
     frozen_versions = {Path(p).name: _hash_file(p, length=12) for p in C.FROZEN_ARTEFACTS}
     chronos_fp = _dir_fingerprint(C.CHRONOS_ADAPTER_DIR)
 
@@ -168,6 +175,7 @@ def archive_models(ctx: dict) -> dict:
         "model_versions": model_versions,          # kopyalanan günlük modeller
         "frozen_versions": frozen_versions,         # git-tracked kalibrasyon (referans)
         "chronos_adapter": chronos_fp,              # büyük donmuş adapter parmak izi
+        "feature_snapshot_ref": feature_snapshot_ref,
     }
     with open(dest / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)

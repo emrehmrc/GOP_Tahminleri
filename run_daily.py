@@ -25,10 +25,10 @@ from datetime import date, datetime
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-from config_live import OOF_HISTORY_PATH
-
 sys.path.insert(0, str(ROOT / "src"))
 from run_context import start_run, archive_models, prune_archive, write_summary
+from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip
+from scorecard import build_daily_scorecard, check_alerts
 
 # ── Loglama ───────────────────────────────────────────────────────────────────
 # Handler'ları start_run() kurar (UI ile ORTAK yol). Burada sadece logger referansı.
@@ -113,18 +113,26 @@ def main():
                             target_date=args.target)
         summary["steps"]["06_deliver"] = result06
 
+        # Faz 0: forecast_log yaz + türetilmiş DuckDB view'ları + günlük yedek.
+        try:
+            summary["steps"]["forecast_log"] = write_forecast_log(ctx)
+            rebuild_duckdb_views()
+            backup_logs_zip()
+        except Exception as e:
+            log.warning(f"Forecast log yazımı hatası (teslimi etkilemez): {e}")
+
+        # Faz 1: daily_scorecard + alarm kontrolü. `log_daily_mape` (oof_feedback.py)
+        # kümülatif MAPE hesaplıyordu (teknik borç #2, roadmap §1.4) — scorecard
+        # günlük/pencereli metrikle onu emekliye ayırıyor.
+        try:
+            summary["steps"]["scorecard"] = build_daily_scorecard()
+            alerts = check_alerts()
+            summary["steps"]["alerts"] = {"count": len(alerts)}
+        except Exception as e:
+            log.warning(f"Scorecard/alarm hatası (teslimi etkilemez): {e}")
+
         summary["status"] = "ok"
         log.info(f"\n✓ Pipeline tamamlandı. Teslim: {result06.get('output_file', '?')}")
-
-        # OOF MAPE log
-        try:
-            sys.path.insert(0, str(ROOT / "src"))
-            from src.oof_feedback import log_daily_mape
-            from config_live import LOGS_DIR
-            mape_entry = log_daily_mape(OOF_HISTORY_PATH, LOGS_DIR)
-            summary["steps"]["mape_log"] = mape_entry
-        except Exception as e:
-            log.warning(f"MAPE log hatası: {e}")
 
     except Exception:
         summary["status"] = "error"

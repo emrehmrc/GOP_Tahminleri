@@ -28,6 +28,7 @@ from config_live import (
 )
 from src.data_scanner import find_csv_for_date, find_latest_csv
 from src.oof_feedback import update_oof_history
+from src.forecast_logger import update_actuals_log
 
 
 def load_source_csv(path: Path) -> pd.DataFrame:
@@ -199,6 +200,13 @@ def run(target_date: Optional[date] = None, source_name: str = "aydem") -> dict:
             print(f"     [OOF] MAPE: {oof_result.get('mape', '?')}")
     except Exception as e:
         print(f"     [OOF] Uyarı: {e}")
+
+    # Faz 0: actuals_log D+1 yük dalgası (y_actual + data_quality_flag)
+    try:
+        al_result = update_actuals_log(validated)
+        print(f"     [ActualsLog] {al_result}")
+    except Exception as e:
+        print(f"     [ActualsLog] Uyarı: {e}")
 
     return {
         "status": "ok",

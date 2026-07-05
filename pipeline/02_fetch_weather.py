@@ -22,11 +22,13 @@ from datetime import date, timedelta
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 from config_live import (
     WEATHER_FC_PARQUET, WEATHER_CACHE_DIR, WEATHER_HISTORY_PARQUET,
     WEATHER_STATIONS, WEATHER_GHI_WEIGHTS,
     OPENMETEO_FORECAST_URL, OPENMETEO_FC_DAYS, WEATHER_TIMEZONE, WEATHER_MODEL,
 )
+from src.forecast_logger import update_actuals_log_weather
 
 PROVINCE_STATIONS = {
     "MUGLA":   [s for s in WEATHER_STATIONS if s.startswith("MUGLA_")],
@@ -179,6 +181,13 @@ def run() -> dict:
 
     # ── weather_history.parquet'i güncelle (ilk 24 saati append et) ─────────
     _update_weather_history(result)
+
+    # Faz 0: actuals_log hava gerçekleşme dalgası (~D+6, weather_history'de dolan _actual'lar)
+    try:
+        wx_result = update_actuals_log_weather()
+        print(f"     [ActualsLog] {wx_result}")
+    except Exception as e:
+        print(f"     [ActualsLog] Uyarı: {e}")
 
     date_min = str(result["Tarih"].min().date())
     date_max = str(result["Tarih"].max().date())
