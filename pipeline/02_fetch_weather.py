@@ -14,6 +14,7 @@ Giriş:  config_live.py'deki istasyon listesi + OPENMETEO_FC_DAYS
 
 import sys
 import time
+import json
 import requests
 import numpy as np
 import pandas as pd
@@ -37,6 +38,7 @@ PROVINCE_STATIONS = {
 }
 DARK_FRAC_PREFIX = {"MUGLA_": "MUGLA_", "DENIZLI_": "DNZ_", "AYDIN_": "AYD_"}
 FC_VARS = "apparent_temperature,precipitation,cloud_cover,shortwave_radiation"
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 
 def _fetch_station(name: str, lat: float, lon: float, retries: int = 4) -> pd.DataFrame | None:
@@ -154,6 +156,73 @@ def _update_weather_history(result: pd.DataFrame):
     print(f"     [weather_history] güncellendi: {len(combined)} satır")
 
 
+def _overlay_past_hours_from_archive(result: pd.DataFrame) -> pd.DataFrame:
+    """Overlay today's past hours with Archive API actuals (runs once per day)."""
+    marker_path = WEATHER_CACHE_DIR / "archive_overlay_marker.json"
+
+    if marker_path.exists():
+        try:
+            with open(marker_path) as f:
+                marker = json.load(f)
+            if marker.get("date") == str(date.today()) and marker.get("applied"):
+                print("     [archive_overlay] bugün zaten uygulanmış, atlanıyor.")
+                return result
+        except Exception:
+            pass
+
+    today_str = str(date.today())
+    current_hour = pd.Timestamp.now(tz=WEATHER_TIMEZONE).hour
+    overlay_count = 0
+
+    for name, (lat, lon) in WEATHER_STATIONS.items():
+        params = {
+            "latitude": lat, "longitude": lon,
+            "start_date": today_str, "end_date": today_str,
+            "hourly": FC_VARS, "timezone": WEATHER_TIMEZONE,
+        }
+        try:
+            r = requests.get(ARCHIVE_URL, params=params, timeout=60)
+            r.raise_for_status()
+            h = r.json()["hourly"]
+            archive_df = pd.DataFrame({
+                "Datetime": pd.to_datetime(h["time"]),
+                f"{name}_app_temp_fc": h["apparent_temperature"],
+                f"{name}_precip_fc": h["precipitation"],
+                f"{name}_cloud_fc": h["cloud_cover"],
+                f"{name}_GHI_fc": h["shortwave_radiation"],
+            })
+        except Exception as e:
+            print(f"     [archive_overlay] {name} Archive API hatası: {e}")
+            continue
+
+        mask = (
+            (result["Datetime"].dt.date == date.today()) &
+            (result["Datetime"].dt.hour < current_hour)
+        )
+        cols_to_overlay = [
+            f"{name}_app_temp_fc", f"{name}_precip_fc",
+            f"{name}_cloud_fc", f"{name}_GHI_fc",
+        ]
+
+        for _, arch_row in archive_df.iterrows():
+            dt = arch_row["Datetime"]
+            match_mask = mask & (result["Datetime"] == dt)
+            if match_mask.any():
+                for col in cols_to_overlay:
+                    result.loc[match_mask, col] = arch_row[col]
+                overlay_count += 1
+
+        time.sleep(0.3)
+
+    print(f"     [archive_overlay] {overlay_count} saat dilimi güncellendi.")
+
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(marker_path, "w") as f:
+        json.dump({"date": today_str, "applied": True}, f)
+
+    return result
+
+
 def run() -> dict:
     """
     Adım 02 — weather forecast.
@@ -170,6 +239,7 @@ def run() -> dict:
         raise RuntimeError("Hava verisi çekilemedi — tüm istasyonlar başarısız.")
 
     derived = compute_derived(raw)
+    derived = _overlay_past_hours_from_archive(derived)
     result  = to_tarih_saat(derived)
 
     # Sadece bugün + gelecek günler (geçmiş saatler olabilir, at)
@@ -181,6 +251,23 @@ def run() -> dict:
 
     # ── weather_history.parquet'i güncelle (ilk 24 saati append et) ─────────
     _update_weather_history(result)
+
+    # weather_history'nin _actual kolonları normalde forecast-API anlık verisiyle
+    # yazılır ama bir daha asla gerçek (Archive API) veriyle geri doldurulmaz —
+    # forecast API bir istasyonu o an döndürmezse NaN kalıcılaşır ve 03_FEATURES'ın
+    # NaN guard'ı pipeline'ı durdurur (2026-07-06 AYDIN istasyonları olayı, elle
+    # fix_weather_history.py çalıştırılarak kurtarıldı). Son 6 günü her koşuda
+    # otomatik Archive API ile onar; başarısız olursa pipeline'ı düşürme.
+    # NOT: Archive API'nin reanalysis verisi bugünü hiç kapsamıyor (end_date=bugün
+    # her zaman 400 döner, doğrulandı) — end_date dün olmalı.
+    try:
+        import fix_weather_history as FWH
+        backfill_start = (date.today() - timedelta(days=6)).isoformat()
+        backfill_end = (date.today() - timedelta(days=1)).isoformat()
+        fwh_result = FWH.run(backfill_start, backfill_end)
+        print(f"     [weather_history_backfill] {fwh_result}")
+    except Exception as e:
+        print(f"     [weather_history_backfill] Uyarı (pipeline devam ediyor): {e}")
 
     # Faz 0: actuals_log hava gerçekleşme dalgası (~D+6, weather_history'de dolan _actual'lar)
     try:
