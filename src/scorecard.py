@@ -75,7 +75,7 @@ def _joined_hourly(con: duckdb.DuckDBPyConnection, window_days: int) -> pd.DataF
     sql = """
         SELECT f.edas_id, f.target_date, f.horizon_day, f.target_ts, f.flag_holiday,
                f.y_pred_xgb, f.y_pred_lgbm, f.y_pred_cat, f.y_pred_chronos,
-               f.y_pred_ens_raw, f.y_pred_final,
+               f.y_pred_ens_raw, f.y_pred_final, f.meta_method,
                f.wx_temp_fcst, f.wx_ghi_fcst,
                a.y_actual, a.wx_temp_actual, a.wx_ghi_actual,
                a.data_quality_flag, a.known_event
@@ -111,6 +111,10 @@ def _daily_agg(hourly: pd.DataFrame) -> pd.DataFrame:
             "mape_chronos": _mape(g["y_pred_chronos"], actual),
             "mape_ens_raw": _mape(g["y_pred_ens_raw"], actual),
             "mape_final": _mape(pred_final, actual),
+            "meta_method": (
+                g["meta_method"].mode().iat[0]
+                if "meta_method" in g.columns and g["meta_method"].notna().any() else None
+            ),
             "flag_holiday": bool(g["flag_holiday"].iloc[0]) if "flag_holiday" in g.columns else False,
             "data_quality_flag_count": int((g["data_quality_flag"].fillna("") != "").sum()),
             "known_event_present": bool(g["known_event"].notna().any()),

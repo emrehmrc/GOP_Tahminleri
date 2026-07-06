@@ -193,9 +193,13 @@ class LightGBMManager:
         if X_val is not None:
             eval_sets.append((X_val, y_val))
 
+        from src.recency_weight import recency_sample_weight
+        sw_fit = recency_sample_weight(X_train_fit.index)
+
         model = lgb.LGBMRegressor(**params)
         model.fit(
             X_train_fit, y_train_fit,
+            sample_weight=sw_fit,
             eval_set=eval_sets,
             eval_metric='mae',
             callbacks=[
@@ -219,6 +223,7 @@ class LightGBMManager:
             model_refit = lgb.LGBMRegressor(**refit_params)
             model_refit.fit(
                 X_train, y_train,
+                sample_weight=recency_sample_weight(X_train.index),
                 eval_metric='mae',
                 callbacks=[]
             )

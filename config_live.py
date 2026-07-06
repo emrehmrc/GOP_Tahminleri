@@ -69,6 +69,53 @@ MAX_TRAIN_SIZE  = 22000    # ~2.5 yıl, concept drift kapağı
 DATA_START_DATE = None
 DATA_END_DATE   = None
 
+# ── Recency (yakınlık) ağırlıklandırma ────────────────────────────────────────
+# GBDT eğitiminde örneklere yaşına göre üstel azalan sample_weight uygular:
+# w = 0.5 ** (yaş_gün / RECENCY_HALFLIFE_DAYS). Amaç: hızlı rejim değişiminde
+# (ör. yaz soğutma rampası) modelin güncel yük seviyesini takip etmesi — eşit
+# ağırlıkla 2.5 yıl eğitim, rampada sistematik düşük-tahmine yol açıyordu.
+# Yarı-ömür ne kadar KISA olursa güncel seviyeye o kadar kilitlenir ama mevsimsel
+# çeşitlilik/şekil öğrenimi zayıflar; ~60g dengeli başlangıç.
+ENABLE_RECENCY_WEIGHTING = True
+RECENCY_HALFLIFE_DAYS    = 60
+
+# ── Rolling Ridge stacker eşiği ────────────────────────────────────────────────
+# DÜZELTME (2026-07-06): 48 (2g), 07-01→07-04 dönemindeki sessiz Chronos-fallback
+# bug'ının (CHRONOS_Pred=XGB kopyası) OOF'u kirlettiği teşhis edilmeden önce
+# konmuştu. Kirli günler artık get_rolling_ridge()'de karantinaya alınıyor
+# (chronos_fallback filtresi, bkz. src/oof_feedback.py) ama demo haftası
+# öncesi TEK temiz günle (07-05) tetiklenip test edilmemiş bir modele geçmeyi
+# göze alamayız. 168 (7g) temiz OOF birikip backtest ile doğrulanana kadar
+# kalibre statik ağırlıkta kal.
+ROLLING_RIDGE_MIN_SAMPLES = 168
+
+# ── Kalibre edilmiş statik ensemble ağırlığı (Rolling Ridge yetene kadar köprü) ─
+# DÜZELTME (2026-07-06): Önceki ağırlık (XGB.34/LGBM.33/CAT.33) canlıdaki
+# Chronos sessiz-fallback bug'ı yüzünden konmuştu — o dönem Chronos'un GERÇEK
+# performansı hiç ölçülememişti (CHRONOS_Pred = XGB kopyasıydı). Bug'suz as-of
+# backtest'te (06-21→07-04, düzeltilmiş master.parquet) CatBoost sistematik kötü
+# ve Chronos en iyi bireysel model çıktı → CAT çıkarıldı, Chronos eklendi.
+#
+# DÜZELTME (2026-07-07): O backtest'teki CAT/LGBM kötülüğünün gerçek nedeni
+# bulundu — best_params_cat_*/best_params_lgbm_general JSON'ları git HEAD'e
+# göre (bu oturumdan önce, commit edilmeden) elle bozulmuştu: CAT loss_function
+# MAE→RMSE, l2_leaf_reg 45→8; LGBM num_leaves 16→48, reg_alpha/lambda 45/35→5/10.
+# `git checkout` ile geri alındı + ENABLE_WEEKEND_SPLIT_XGB/LGBM açıldı (p0_updated
+# ile hizalı). Sonuç: LGBM solo MAPE %8.11→%4.97 (gerçekten düzeldi), CAT solo
+# hâlâ ~%6.9 (param düzeltmesi CAT'i kurtarmadı — ayrı, bulunmamış bir sorun var,
+# muhtemelen categorical feature handling ya da p0_updated'den başka bir fark;
+# takip gerekiyor). LGBM artık XGB'ye yakın ama GBDT olduğu için hatası XGB'yle
+# korelasyonlu — grid+LOO optimizasyonu serbest bırakılınca yine ~0 ağırlık
+# seçiyor, ama %10 pay ZORLANINCA maliyeti neredeyse sıfır (+0.03pp, bkz.
+# backtest_catlgbm_fix.log). Kullanıcı 4 modelin birlikte çalışmasını istediği
+# için bu bedelsiz payı kabul ediyoruz. CAT düzelene kadar dışarıda.
+CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.35, "LGBM_Pred": 0.10, "CHRONOS_Pred": 0.55}
+
+# CatBoost holiday-solo override (bkz. 04_predict_48h.py:_apply_holiday_override):
+# CAT bozukken (yukarı bkz.) tatil saatlerinde CAT-solo'ya geçmek zararlı —
+# CAT düzelene kadar kapalı.
+ENABLE_CAT_HOLIDAY_OVERRIDE = False
+
 # ── DataManager için INPUT_FILE_PATH (çalışma zamanında override edilir) ──────
 INPUT_FILE_PATH = str(DATA_DIR / "weather_cache" / "_tmp_combined.xlsx")
 
@@ -101,6 +148,10 @@ MODEL_NAME          = "live_xgboost.json"
 
 # ── HPO / Training params ─────────────────────────────────────────────────────
 HPO_PARAMS_SUFFIX = "_sagemaker_hpo"
+# DÜZELTME (2026-07-07): p0_updated referans config'i (2026-06-23 Final 365 CV,
+# T+2 %2.28) XGB+LGBM için weekend split kullanıyordu — kod zaten yazılıydı
+# (model_manager.py/lightgbm_manager.py), sadece flag kapalıydı. CAT'te p0'da da
+# kapalı, öyle kalıyor.
 ENABLE_WEEKEND_SPLIT_XGB  = True
 ENABLE_WEEKEND_SPLIT_LGBM = True
 ENABLE_WEEKEND_SPLIT_CAT  = False

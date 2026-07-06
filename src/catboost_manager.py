@@ -187,11 +187,15 @@ class CatBoostManager:
             X_train_fit, y_train_fit = X_train, y_train
             X_val, y_val = None, None
 
+        from src.recency_weight import recency_sample_weight
+        sw_fit = recency_sample_weight(X_train_fit.index)
+
         model = CatBoostRegressor(**params)
 
         if X_val is not None:
             model.fit(
                 X_train_fit, y_train_fit,
+                sample_weight=sw_fit,
                 eval_set=(X_val, y_val),
                 use_best_model=True,
                 verbose=False
@@ -199,6 +203,7 @@ class CatBoostManager:
         else:
             model.fit(
                 X_train_fit, y_train_fit,
+                sample_weight=sw_fit,
                 use_best_model=True,
                 verbose=False
             )
@@ -218,6 +223,7 @@ class CatBoostManager:
             model_refit = CatBoostRegressor(**refit_params)
             model_refit.fit(
                 X_train, y_train,
+                sample_weight=recency_sample_weight(X_train.index),
                 verbose=False
             )
             return model_refit

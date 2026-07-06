@@ -121,9 +121,8 @@ def main():
         except Exception as e:
             log.warning(f"Forecast log yazımı hatası (teslimi etkilemez): {e}")
 
-        # Faz 1: daily_scorecard + alarm kontrolü. `log_daily_mape` (oof_feedback.py)
-        # kümülatif MAPE hesaplıyordu (teknik borç #2, roadmap §1.4) — scorecard
-        # günlük/pencereli metrikle onu emekliye ayırıyor.
+        # Faz 1: daily_scorecard + alarm kontrolü. (Eski `log_daily_mape` kümülatif
+        # MAPE'si — teknik borç #2, roadmap §1.4 — kaldırıldı; yerini scorecard aldı.)
         try:
             summary["steps"]["scorecard"] = build_daily_scorecard()
             alerts = check_alerts()

@@ -420,9 +420,19 @@ def rebuild_duckdb_views() -> dict:
 
         created = []
         if any(C.FORECAST_LOG_DIR.rglob("*.parquet")):
+            # Dedup: aynı (edas_id, target_ts, horizon_day) için birden çok run
+            # birikebilir (backfill farklı run_id ile gerçek run'ın üstüne yazmaz).
+            # Her hücrede tek satır bırak; gerçek run'ı backfill'e tercih et
+            # (backfill=true sona düşer), sonra en güncel issue_ts'yi seç. Aksi
+            # halde scorecard, actual geldiğinde gerçek + backfill satırlarını
+            # ortalayıp yanlış MAPE üretir.
             con.execute(
                 f"CREATE OR REPLACE VIEW forecast_log_v AS "
-                f"SELECT * FROM read_parquet('{fc_glob}', hive_partitioning=1)"
+                f"SELECT * FROM read_parquet('{fc_glob}', hive_partitioning=1) "
+                f"QUALIFY row_number() OVER ("
+                f"  PARTITION BY edas_id, target_ts, horizon_day "
+                f"  ORDER BY (run_id LIKE '%backfill%') ASC, issue_ts DESC, run_id DESC"
+                f") = 1"
             )
             created.append("forecast_log_v")
         if any(C.ACTUALS_LOG_DIR.rglob("*.parquet")):

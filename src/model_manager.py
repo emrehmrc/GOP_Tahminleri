@@ -197,10 +197,14 @@ class ModelManager:
         if X_val is not None:
             eval_sets.append((X_val, y_val))
 
+        from src.recency_weight import recency_sample_weight
+        sw_fit = recency_sample_weight(X_train_fit.index)
+
         model = xgb.XGBRegressor(**params)
         model.fit(
             X_train_fit, y_train_fit,
             eval_set=eval_sets,
+            sample_weight=sw_fit,
             verbose=False
         )
 
@@ -219,6 +223,7 @@ class ModelManager:
             model_refit = xgb.XGBRegressor(**refit_params)
             model_refit.fit(
                 X_train, y_train,
+                sample_weight=recency_sample_weight(X_train.index),
                 verbose=False
             )
             return model_refit

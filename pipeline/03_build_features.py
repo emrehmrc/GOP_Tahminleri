@@ -73,10 +73,10 @@ def merge_actual_and_forecast() -> pd.DataFrame:
     - Eksik weather satırları (yeni ingest edilen gün) _fc'den tamamlanır
     """
     master = pd.read_parquet(MASTER_PARQUET)
-    master[RAW_DATE_COL] = pd.to_datetime(master[RAW_DATE_COL])
+    master[RAW_DATE_COL] = pd.to_datetime(master[RAW_DATE_COL]).dt.normalize()
 
     history = pd.read_parquet(WEATHER_HISTORY_PARQUET)
-    history[RAW_DATE_COL] = pd.to_datetime(history[RAW_DATE_COL])
+    history[RAW_DATE_COL] = pd.to_datetime(history[RAW_DATE_COL]).dt.normalize()
 
     historical = master.merge(history, on=[RAW_DATE_COL, RAW_HOUR_COL], how="left", suffixes=(None, "_dup"))
     dup_cols = [c for c in historical.columns if c.endswith("_dup")]
@@ -138,6 +138,7 @@ def merge_actual_and_forecast() -> pd.DataFrame:
     )
     combined = combined.sort_values([RAW_DATE_COL, RAW_HOUR_COL]).reset_index(drop=True)
     combined = _backfill_calendar_columns(combined)
+    combined = _add_weekend_features(combined)
     return combined
 
 
@@ -147,12 +148,12 @@ def _backfill_calendar_columns(df: pd.DataFrame) -> pd.DataFrame:
     göre (Tarih.normalize() + Saat 0->24 düzeltmesi) doldurulmuş olmalı.
     Doğrulandı: gerçek parquette Saat=0 (Tarih=D) satırının Yıl/Ay/Gün/
     Ramazan_Bayram değerleri D+1'in takvim/tatil bilgisini taşıyor.
-    Sadece NaN (yeni ingest edilen / forecast penceresi) satırları doldurulur
-    — geçmiş veriye dokunulmaz.
+    TÜM satırlar doldurulur (bug fix: önceki kod sütun yoksa return ediyordu).
     """
     calendar_cols = ["Yıl", "Ay", "Gün", "Haftanın_Günü", "Ramazan_Bayram", "Kurban_Bayram"]
-    if any(c not in df.columns for c in calendar_cols):
-        return df
+    for col in calendar_cols:
+        if col not in df.columns:
+            df[col] = np.nan
 
     needs_fill = df[calendar_cols].isna().any(axis=1)
     if not needs_fill.any():
@@ -187,6 +188,18 @@ def _backfill_calendar_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df.loc[needs_fill, "Ramazan_Bayram"] = ramazan_vals
     df.loc[needs_fill, "Kurban_Bayram"] = kurban_vals
+
+    return df
+
+
+def _add_weekend_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Hafta sonu binary feature'ları ve Pazar/geçmiş işgünü oranı."""
+    if "Haftanın_Günü" not in df.columns:
+        return df
+
+    df["Is_Weekend"]   = df["Haftanın_Günü"].isin([6, 7]).astype(np.int8)
+    df["Is_Sunday"]    = (df["Haftanın_Günü"] == 7).astype(np.int8)
+    df["Is_Saturday"]  = (df["Haftanın_Günü"] == 6).astype(np.int8)
 
     return df
 
@@ -236,6 +249,19 @@ def run() -> dict:
     # Özellik matrisini kaydet
     FEATURE_MATRIX_PATH.parent.mkdir(parents=True, exist_ok=True)
     feature_df.to_parquet(FEATURE_MATRIX_PATH)
+
+    # NaN GUARD — training rows'da NaN feature varsa pipeline durur
+    train_mask = feature_df[RAW_TARGET_COL].notna()
+    if train_mask.any():
+        nan_count = feature_df.loc[train_mask].isna().sum().sum()
+        if nan_count > 0:
+            nan_cols = feature_df.loc[train_mask].isna().sum()
+            nan_cols = nan_cols[nan_cols > 0].sort_values(ascending=False)
+            msg = f"CRITICAL: {nan_count} NaN cells in training data!\n"
+            for c, n in nan_cols.head(10).items():
+                msg += f"  {c}: {n} NaN\n"
+            raise RuntimeError(msg)
+        print("     NaN guard: OK (0 NaN)")
 
     n_features = feature_df.select_dtypes(include=["number", "category", "bool"]).shape[1]
     print(f"     {len(feature_df)} satır  |  {n_features} feature  |  kayıt: {FEATURE_MATRIX_PATH.name}")

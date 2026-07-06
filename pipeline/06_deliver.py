@@ -13,6 +13,7 @@ NOT: Müşteri formatı şu an "basit sade tablo" olarak yazılıyor.
 """
 
 import sys
+import logging
 import pandas as pd
 from pathlib import Path
 from datetime import date, timedelta
@@ -22,9 +23,65 @@ sys.path.insert(0, str(ROOT))
 
 from config_live import (
     DATA_DIR, OUTPUT_DIR, ARCHIVE_DIR, OUTPUT_FILENAME_TEMPLATE,
+    MASTER_PARQUET, RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL,
 )
 
+log = logging.getLogger("adm_live")
+
 POSTPROC_PATH = DATA_DIR / "weather_cache" / "postprocessed_predictions.parquet"
+
+SANITY_BAND_MARGIN = 0.25   # 7-gün aynı-saat bandının ±%25 dışı -> flag
+SANITY_FLAT_RATIO   = 0.15  # tahmin 24h std'si son 7g günlük std ortalamasının altında bu oranın -> flag
+
+
+def _sanity_check(output_df: pd.DataFrame) -> list:
+    """Teslim öncesi son kontrol: 7-gün aynı-saat bandı, düzlük, NaN/negatif.
+
+    Engellemez (pipeline'ı durdurmaz) — sadece loglara ve summary.json'a
+    GÖRÜNÜR flag düşer. Gözetimsiz sabah çalışmasında sert durdurma riskli
+    (yanlış-pozitif tüm teslimi keser); bunun yerine triyaj sinyali üretir.
+    """
+    flags = []
+
+    neg = output_df["Tahmin_MWh"] < 0
+    if neg.any():
+        flags.append({"type": "negative", "n": int(neg.sum()),
+                       "hours": output_df.loc[neg, "Saat"].tolist()})
+    nan = output_df["Tahmin_MWh"].isna()
+    if nan.any():
+        flags.append({"type": "nan", "n": int(nan.sum()),
+                       "hours": output_df.loc[nan, "Saat"].tolist()})
+
+    if not MASTER_PARQUET.exists():
+        return flags
+    master = pd.read_parquet(MASTER_PARQUET, columns=[RAW_DATE_COL, RAW_HOUR_COL, RAW_TARGET_COL])
+    master[RAW_DATE_COL] = pd.to_datetime(master[RAW_DATE_COL])
+    last_date = master[RAW_DATE_COL].max()
+    recent = master[master[RAW_DATE_COL] > last_date - pd.Timedelta(days=7)]
+    if recent.empty:
+        return flags
+
+    by_hour = recent.groupby(RAW_HOUR_COL)[RAW_TARGET_COL].agg(["min", "max"])
+    out_of_band = []
+    for _, row in output_df.iterrows():
+        h = int(row["Saat"])
+        if h not in by_hour.index or pd.isna(row["Tahmin_MWh"]):
+            continue
+        lo, hi = by_hour.loc[h, "min"], by_hour.loc[h, "max"]
+        margin = (hi - lo) * SANITY_BAND_MARGIN if hi > lo else hi * SANITY_BAND_MARGIN
+        if not (lo - margin <= row["Tahmin_MWh"] <= hi + margin):
+            out_of_band.append(h)
+    if out_of_band:
+        flags.append({"type": "out_of_band", "n": len(out_of_band), "hours": out_of_band,
+                       "margin_pct": SANITY_BAND_MARGIN * 100})
+
+    pred_std = output_df["Tahmin_MWh"].std()
+    recent_daily_std = recent.groupby(recent[RAW_DATE_COL].dt.date)[RAW_TARGET_COL].std().mean()
+    if pd.notna(recent_daily_std) and recent_daily_std > 0 and pred_std < SANITY_FLAT_RATIO * recent_daily_std:
+        flags.append({"type": "flat", "pred_std": round(float(pred_std), 1),
+                       "recent_daily_std_avg": round(float(recent_daily_std), 1)})
+
+    return flags
 
 
 def run(target_date: str = None) -> dict:
@@ -73,6 +130,17 @@ def run(target_date: str = None) -> dict:
         "Saat":   t2_df["Datetime"].dt.hour,
         "Tahmin_MWh": t2_df["Final_Pred"].round(2),
     })
+    # Savunmacı: müşteri dosyası her koşulda Saat 0..23 kronolojik olsun (upstream
+    # sıra bozulsa bile). 04 artık sıralı yazıyor ama teslim çıktısını garantiye al.
+    output_df = output_df.sort_values(["Tarih", "Saat"]).reset_index(drop=True)
+
+    # Teslim-öncesi sanity bekçisi — engellemez, sadece görünür flag düşer.
+    sanity_flags = _sanity_check(output_df)
+    if sanity_flags:
+        log.warning(f"[06] SANITY UYARI — teslim şüpheli olabilir: {sanity_flags}")
+        print(f"     [Sanity] UYARI: {sanity_flags}")
+    else:
+        print("     [Sanity] OK")
 
     # Excel yaz
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -93,6 +161,7 @@ def run(target_date: str = None) -> dict:
         "output_file": str(output_path),
         "target_date": target_str,
         "n_hours": len(t2_df),
+        "sanity_flags": sanity_flags,
     }
 
 

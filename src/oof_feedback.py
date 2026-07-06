@@ -8,18 +8,39 @@ PV bias / holiday alpha refit için residual kaydeder.
 Çağrı sırası:
   1. update_oof_history() — step 01'den sonra (actual ingest sonrası)
   2. get_rolling_ridge()  — step 04'te stack_predictions içinde
-  3. log_daily_mape()     — step 06'dan sonra
+
+NOT: log_daily_mape() (kümülatif MAPE, roadmap borç #2) emekliye ayrıldı —
+yerini src/scorecard.py'nin günlük/pencereli daily_scorecard'ı aldı.
 """
 
 from __future__ import annotations
 
 import os
-import json
 import numpy as np
 import pandas as pd
+
+import config_live as _C
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Optional
+
+
+def _is_chronos_fallback(day_forecast: pd.DataFrame) -> bool:
+    """Eski (pre-fix) Chronos sessiz-fallback bug'ının imzası: Chronos çökünce
+    CHRONOS_Pred = XGB_Pred birebir kopyalanıyordu (bkz. 04_predict_48h.py run()
+    içindeki chronos_ok=False dalı) — bu günlerde "4-model" aslında XGB'yi iki kez
+    sayıyor ve T+2 recursive'de LGBM'in düzleşmesiyle birleşince ensemble'ı
+    kolinear/bozuk verilerle kirletiyordu (2026-07-06 oturum teşhisi, arşivlenmiş
+    2026-07-03/07-04 run'larında gözlemlendi). get_rolling_ridge bu günleri
+    eğitim setinden dışlamalı — yoksa Rolling Ridge aktifleştiği an bu bozuk
+    günlerle zehirlenir."""
+    if "XGB_Pred" not in day_forecast.columns or "CHRONOS_Pred" not in day_forecast.columns:
+        return False
+    x = day_forecast["XGB_Pred"].to_numpy(dtype=float)
+    c = day_forecast["CHRONOS_Pred"].to_numpy(dtype=float)
+    if len(x) == 0 or np.isnan(x).all() or np.isnan(c).all():
+        return False
+    return bool(np.allclose(x, c, rtol=1e-6, atol=1e-6, equal_nan=True))
 
 
 def _find_archive_for_date(archive_dir: Path, target_date: str) -> Optional[Path]:
@@ -86,13 +107,16 @@ def update_oof_history(
     day_forecast["hour"] = day_forecast["Datetime"].dt.hour
     day_actuals_dict = {int(r[raw_hour_col]): r[raw_target_col] for _, r in day_actuals.iterrows()}
 
+    chronos_fallback = _is_chronos_fallback(day_forecast)
+
     records = []
     for _, row in day_forecast.iterrows():
         h = int(row["hour"])
         actual = day_actuals_dict.get(h)
         if actual is None or np.isnan(actual):
             continue
-        rec = {"date": str(last_actual_date), "hour": h, "actual": float(actual)}
+        rec = {"date": str(last_actual_date), "hour": h, "actual": float(actual),
+               "chronos_fallback": chronos_fallback}
         for col in ["XGB_Pred", "LGBM_Pred", "CAT_Pred", "CHRONOS_Pred", "Ensemble_Pred"]:
             if col in row and pd.notna(row[col]):
                 rec[col] = float(row[col])
@@ -131,18 +155,43 @@ def get_rolling_ridge(
     oof_path: Path,
     pred_cols: list,
     lookback_days: int = 60,
-    min_samples: int = 168,
+    min_samples: int | None = None,
 ) -> Optional[object]:
     """
     OOF history üzerinde rolling Ridge meta-model eğit.
     Step 04'te stack_predictions tarafından çağrılır.
 
-    Returns: trained Ridge model or None (yeterli veri yoksa)
+    NEDEN eşik düşürüldü (varsayılan 168 -> config ROLLING_RIDGE_MIN_SAMPLES,
+    şu an 48): 168 saat (7 gün) OOF birikene kadar donmuş 3-model (XGB/LGBM/CAT,
+    Chronos'suz — Boray'ın kendi CV artefaktı) stacker kullanılıyordu. Bu statik
+    ağırlık (XGB=0.50, LGBM=0.50, CAT=0) LGBM'in belirli günlerde düzleşmesini
+    (recursive T+2'de gözlemlendi) telafi edemiyor, çünkü Chronos formülde hiç
+    yok. 48 saat (2 gün) sonra adaptif Ridge devreye girip 4 modeli de güncel
+    hataya göre ağırlıklandırır — alpha=100 güçlü regularizasyon az veriyle aşırı
+    uydurmayı sınırlar.
+
+    Returns: (trained Ridge model, eğitimde kullanılan kolon listesi) veya None
+    (yeterli veri yoksa). Kolon listesi ZORUNLU dönüyor — çağıran taraf kendi
+    pred_cols'undan farklı bir sırayla/sette `.predict()` çağırırsa (ör. OOF'ta
+    olmayan CAT_Pred'i dahil ederse) sklearn "X has N features, Ridge expects M"
+    hatası fırlatır (canlıda yaşandı, teşhis edildi).
     """
+    if min_samples is None:
+        min_samples = getattr(_C, "ROLLING_RIDGE_MIN_SAMPLES", 168)
     if not oof_path.exists():
         return None
 
     oof = pd.read_parquet(oof_path)
+
+    # Kirli gün karantinası: eski Chronos-fallback bug'ının imzasını taşıyan
+    # satırlar (bkz. _is_chronos_fallback) eğitim setine ASLA girmemeli — yoksa
+    # Rolling Ridge aktifleştiği an kolinear/bozuk veriyle zehirlenir (2026-07-06
+    # oturum teşhisi: 48 satırlık ilk OOF'un yarısı böyle kirliydi). Eski
+    # kayıtlarda kolon yoksa (bu düzeltmeden önce yazılmış) temiz kabul edilir —
+    # kirlilik olsa bile ondan sonraki adımda `min_samples` eşiği zaten korur.
+    if "chronos_fallback" in oof.columns:
+        oof = oof[~oof["chronos_fallback"].fillna(False)].copy()
+
     if len(oof) < min_samples:
         return None
 
@@ -177,51 +226,4 @@ def get_rolling_ridge(
     ridge.fit(X, y)
 
     print(f"     [Stacker] Rolling Ridge OOF ({len(y)} samples, {lookback_days}d) — cols: {available}")
-    return ridge
-
-
-def log_daily_mape(oof_path: Path, logs_dir: Path) -> dict:
-    """Günlük MAPE'yi logs/mape_history.json'a kaydet."""
-    if not oof_path.exists():
-        return {"status": "no_oof"}
-
-    oof = pd.read_parquet(oof_path)
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    mape_log_path = logs_dir / "mape_history.json"
-
-    history = []
-    if mape_log_path.exists():
-        try:
-            history = json.loads(mape_log_path.read_text(encoding="utf-8"))
-        except Exception:
-            history = []
-
-    # Her model için günlük MAPE hesapla
-    oof["date"] = pd.to_datetime(oof["date"]).dt.strftime("%Y-%m-%d")
-    daily = oof.groupby("date").agg({
-        "actual": "mean",
-        "XGB_Pred": "mean" if "XGB_Pred" in oof.columns else lambda x: np.nan,
-        "LGBM_Pred": "mean" if "LGBM_Pred" in oof.columns else lambda x: np.nan,
-        "Ensemble_Pred": "mean" if "Ensemble_Pred" in oof.columns else lambda x: np.nan,
-    }).reset_index()
-
-    results = {}
-    for col in ["XGB_Pred", "LGBM_Pred", "CAT_Pred", "CHRONOS_Pred", "Ensemble_Pred"]:
-        if col in oof.columns:
-            valid = oof.dropna(subset=[col, "actual"])
-            if len(valid) > 0:
-                mape = np.mean(np.abs((valid["actual"] - valid[col]) / (valid["actual"] + 1e-10))) * 100
-                results[col] = round(float(mape), 2)
-
-    entry = {
-        "date": str(date.today()),
-        "oof_rows": len(oof),
-        "mape_by_model": results,
-    }
-    history.append(entry)
-    # Son 365 günü tut
-    history = history[-365:]
-    mape_log_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    print(f"     [MAPE Log] {results}")
-    return entry
+    return ridge, available

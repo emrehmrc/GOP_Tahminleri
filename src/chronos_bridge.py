@@ -23,6 +23,8 @@ FUTURE_KNOWN = [
     "sin_doy",
     "cos_doy",
     "is_sunset_flag",
+    "is_monday",
+    "is_weekend",
     "Temp_Avg",
     "HDD_Stress",
     "CDD_Stress",
