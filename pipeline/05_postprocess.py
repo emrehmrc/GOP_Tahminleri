@@ -30,6 +30,7 @@ from config_live import (
     PV_BIAS_FIT_EXCLUDE_HOLIDAYS, PV_BIAS_FALLBACK_ENABLED,
     PV_BIAS_LOOKUP_T1, PV_BIAS_LOOKUP_T2,
     POST_HOLIDAY_MULTIPLIERS_T1, POST_HOLIDAY_MULTIPLIERS_T2,
+    ENSEMBLE_BIAS_CORRECTION_T1_MWH, ENSEMBLE_BIAS_CORRECTION_T2_MWH,
 )
 
 FEATURE_MATRIX_PATH    = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
@@ -155,6 +156,14 @@ def run() -> dict:
     preds.index = predict_idx
     pre_mean = float(preds.mean())
 
+    # ── Ensemble bias düzeltme (sistematik under-estimation karşıtı) ──────────
+    # T+1 saatlerine +10 MWh, T+2 saatlerine +15 MWh ekler.
+    # bkz. config_live.ENSEMBLE_BIAS_CORRECTION_T1_MWH / T2_MWH
+    is_t2 = raw_preds_df["horizon_day"].to_numpy() == "T+2"
+    bias_arr = np.where(is_t2, ENSEMBLE_BIAS_CORRECTION_T2_MWH, ENSEMBLE_BIAS_CORRECTION_T1_MWH)
+    preds = preds + bias_arr
+    bias_total = float(bias_arr.sum())
+
     after_sub = preds
     if ENABLE_HOLIDAY_SUBSTITUTION:
         after_sub = apply_holiday_substitution(preds, feature_df, predict_idx)
@@ -172,6 +181,7 @@ def run() -> dict:
     preds = after_pv
     post_mean = float(preds.mean())
     result_df = raw_preds_df.copy()
+    result_df["bias_delta"] = bias_arr
     result_df["subst_active"] = subst_delta != 0
     result_df["subst_delta"] = subst_delta
     result_df["pv_bias_delta"] = pv_bias_delta
@@ -180,13 +190,14 @@ def run() -> dict:
     POSTPROC_PATH.parent.mkdir(parents=True, exist_ok=True)
     result_df.to_parquet(POSTPROC_PATH, index=False)
 
-    print(f"     Ham ortalama: {pre_mean:.1f} MWh  →  Final: {post_mean:.1f} MWh  (Δ {post_mean-pre_mean:+.1f})")
+    print(f"     Ham ortalama: {pre_mean:.1f} MWh  →  Final: {post_mean:.1f} MWh  (Δ {post_mean-pre_mean:+.1f}, bias {bias_total:+.1f})")
 
     return {
         "status": "ok",
         "pre_mean":   round(pre_mean, 2),
         "post_mean":  round(post_mean, 2),
         "delta_mean": round(post_mean - pre_mean, 2),
+        "bias_total": round(bias_total, 2),
     }
 
 

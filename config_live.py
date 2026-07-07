@@ -109,7 +109,14 @@ ROLLING_RIDGE_MIN_SAMPLES = 168
 # seçiyor, ama %10 pay ZORLANINCA maliyeti neredeyse sıfır (+0.03pp, bkz.
 # backtest_catlgbm_fix.log). Kullanıcı 4 modelin birlikte çalışmasını istediği
 # için bu bedelsiz payı kabul ediyoruz. CAT düzelene kadar dışarıda.
-CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.35, "LGBM_Pred": 0.10, "CHRONOS_Pred": 0.55}
+CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.40, "LGBM_Pred": 0.10, "CHRONOS_Pred": 0.50}
+
+# ── Ensemble bias düzeltme (sistematik under-estimation karşıtı) ──────────────────
+# 2026-07-07 grid search: T+2'de Final_Pred ME=-21 MWh, +15 MWh bias MAPE'yi
+# %2.15→%2.02'ye indiriyor. T+1'de +10 MWh optimal. Holdout test'te (4 gün train,
+# 3 gün test) doğrulandı: optimized weights+bias test MAPE=%1.78.
+ENSEMBLE_BIAS_CORRECTION_T1_MWH = 10
+ENSEMBLE_BIAS_CORRECTION_T2_MWH = 15
 
 # CatBoost holiday-solo override (bkz. 04_predict_48h.py:_apply_holiday_override):
 # CAT bozukken (yukarı bkz.) tatil saatlerinde CAT-solo'ya geçmek zararlı —
