@@ -118,6 +118,25 @@ CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.40, "LGBM_Pred": 0.10, "CHRONOS_Pre
 ENSEMBLE_BIAS_CORRECTION_T1_MWH = 10
 ENSEMBLE_BIAS_CORRECTION_T2_MWH = 15
 
+# ── Gün-tipi duyarlı bias scaling (Fix 2026-07-07) ─────────────────────────────
+# Hafta sonu (cumartesi/pazar) yükleri daha düşük; +15 MWh bias over-correction
+# yapıp Final_Pred'i Ensemble'dan kötü hale getiriyordu (örn. 20 Haziran Cmt:
+# Ensemble %5.75 → Final %8.01). Hafta sonu bias'ı scale edilir.
+# 30-gün analizine göre:
+#   Hafta içi: Final ME=-9.6 (iyileşme), Ensemble ME=-27.8 → bias faydalı
+#   Cumartesi: Final ME=+5.5 (over-düzeltme!), Ensemble ME=-19.0 → bias ZARARLI
+#   Pazar:     Final ME=-6.1 (iyileşme), Ensemble ME=-25.8 → bias faydalı
+ENSEMBLE_BIAS_WEEKEND_SCALE_T1 = 0.30   # Cumartesi T+1: +10 * 0.30 = +3 MWh (minimal)
+ENSEMBLE_BIAS_WEEKEND_SCALE_T2 = 0.20   # Cumartesi T+2: +15 * 0.20 = +3 MWh (minimal)
+ENSEMBLE_BIAS_SUNDAY_SCALE_T1   = 0.60   # Pazar T+1: +10 * 0.60 = +6 MWh (orta)
+ENSEMBLE_BIAS_SUNDAY_SCALE_T2   = 0.50   # Pazar T+2: +15 * 0.50 = +7.5 MWh (orta)
+
+# ── LGBM Pazar günü sample weight boost ───────────────────────────────────────
+# WE (Sat-Sun) split'te Sunday örnekleri Saturday'e göre ~5x az → model
+# Saturday pattern'lerine overfit, Sunday'de under-predict yapıyor (MAPE %7.4).
+# Sunday örneklerine ek weight verir.
+LGBM_SUNDAY_WEIGHT_BOOST = 2.5  # Sunday sample_weight = 1.0 + boost
+
 # CatBoost holiday-solo override (bkz. 04_predict_48h.py:_apply_holiday_override):
 # CAT bozukken (yukarı bkz.) tatil saatlerinde CAT-solo'ya geçmek zararlı —
 # CAT düzelene kadar kapalı.

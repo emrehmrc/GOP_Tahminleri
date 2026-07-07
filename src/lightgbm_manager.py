@@ -166,7 +166,17 @@ class LightGBMManager:
             model_wd_sat = self._fit_single_model(X_train_wd_sat, y_train_wd_sat, params_wd)
             
             print(f"[LightGBMManager] Training Model B (WE) on {len(X_train_we)} samples...")
-            model_we = self._fit_single_model(X_train_we, y_train_we, params_we)
+            # Sunday boost: WE model Sat+Sun birlikte eğitir ama Saturday ~5x daha
+            # fazla sample → Sunday under-predict (MAPE %7.4 vs %5.8). Sunday örneklerine
+            # extra weight ver.
+            from config_live import LGBM_SUNDAY_WEIGHT_BOOST
+            we_boost = np.ones(len(X_train_we))
+            if isinstance(dow_train, pd.Series):
+                we_dow = dow_train[we_mask] if isinstance(we_mask, pd.Series) else dow_train[np.array(we_mask)]
+            else:
+                we_dow = dow_train[np.array(we_mask)]
+            we_boost[we_dow == 6] = 1.0 + LGBM_SUNDAY_WEIGHT_BOOST
+            model_we = self._fit_single_model(X_train_we, y_train_we, params_we, sample_weight=we_boost)
             
             self.model = HybridLightGBMModel(model_wd_sat, model_we)
             print("[LightGBMManager] Hybrid training finished successfully.")
@@ -175,7 +185,7 @@ class LightGBMManager:
             self.model = self._fit_single_model(X_train, y_train, params_wd)
 
 
-    def _fit_single_model(self, X_train, y_train, params):
+    def _fit_single_model(self, X_train, y_train, params, sample_weight=None):
         from config_live import ENABLE_GBDT_REFIT
         
         # Reserve last 20% of training data (chronologically) for early stopping validation.
@@ -185,9 +195,13 @@ class LightGBMManager:
             y_train_fit = y_train.iloc[:split_idx]
             X_val = X_train.iloc[split_idx:]
             y_val = y_train.iloc[split_idx:]
+            sw_split = sample_weight[:split_idx] if sample_weight is not None else None
+            sw_val = sample_weight[split_idx:] if sample_weight is not None else None
         else:
             X_train_fit, y_train_fit = X_train, y_train
             X_val, y_val = None, None
+            sw_split = sample_weight
+            sw_val = None
 
         eval_sets = [(X_train_fit, y_train_fit)]
         if X_val is not None:
@@ -195,6 +209,8 @@ class LightGBMManager:
 
         from src.recency_weight import recency_sample_weight
         sw_fit = recency_sample_weight(X_train_fit.index)
+        if sw_split is not None:
+            sw_fit = sw_fit * sw_split
 
         model = lgb.LGBMRegressor(**params)
         model.fit(
@@ -220,10 +236,13 @@ class LightGBMManager:
             if 'early_stopping_rounds' in refit_params:
                 del refit_params['early_stopping_rounds']
                 
+            sw_refit = recency_sample_weight(X_train.index)
+            if sample_weight is not None:
+                sw_refit = sw_refit * sample_weight
             model_refit = lgb.LGBMRegressor(**refit_params)
             model_refit.fit(
                 X_train, y_train,
-                sample_weight=recency_sample_weight(X_train.index),
+                sample_weight=sw_refit,
                 eval_metric='mae',
                 callbacks=[]
             )

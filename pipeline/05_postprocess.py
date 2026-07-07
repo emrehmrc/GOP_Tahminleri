@@ -31,6 +31,8 @@ from config_live import (
     PV_BIAS_LOOKUP_T1, PV_BIAS_LOOKUP_T2,
     POST_HOLIDAY_MULTIPLIERS_T1, POST_HOLIDAY_MULTIPLIERS_T2,
     ENSEMBLE_BIAS_CORRECTION_T1_MWH, ENSEMBLE_BIAS_CORRECTION_T2_MWH,
+    ENSEMBLE_BIAS_WEEKEND_SCALE_T1, ENSEMBLE_BIAS_WEEKEND_SCALE_T2,
+    ENSEMBLE_BIAS_SUNDAY_SCALE_T1, ENSEMBLE_BIAS_SUNDAY_SCALE_T2,
 )
 
 FEATURE_MATRIX_PATH    = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
@@ -157,10 +159,22 @@ def run() -> dict:
     pre_mean = float(preds.mean())
 
     # ── Ensemble bias düzeltme (sistematik under-estimation karşıtı) ──────────
-    # T+1 saatlerine +10 MWh, T+2 saatlerine +15 MWh ekler.
-    # bkz. config_live.ENSEMBLE_BIAS_CORRECTION_T1_MWH / T2_MWH
+    # Gün-tipi duyarlı: hafta sonu yükleri düşük, bias over-correction riski var.
+    # Pazar < Cumartesi < Hafta içi bias scaling.
     is_t2 = raw_preds_df["horizon_day"].to_numpy() == "T+2"
     bias_arr = np.where(is_t2, ENSEMBLE_BIAS_CORRECTION_T2_MWH, ENSEMBLE_BIAS_CORRECTION_T1_MWH)
+
+    day_type = raw_preds_df["day_type"].to_numpy()
+    is_sunday = day_type == "pazar"
+    is_weekend = (day_type == "cumartesi") | is_sunday
+
+    scale_t1 = np.where(is_sunday, ENSEMBLE_BIAS_SUNDAY_SCALE_T1,
+                        np.where(is_weekend, ENSEMBLE_BIAS_WEEKEND_SCALE_T1, 1.0))
+    scale_t2 = np.where(is_sunday, ENSEMBLE_BIAS_SUNDAY_SCALE_T2,
+                        np.where(is_weekend, ENSEMBLE_BIAS_WEEKEND_SCALE_T2, 1.0))
+    bias_scale = np.where(is_t2, scale_t2, scale_t1)
+
+    bias_arr = bias_arr * bias_scale
     preds = preds + bias_arr
     bias_total = float(bias_arr.sum())
 
