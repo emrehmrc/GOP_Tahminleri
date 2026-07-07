@@ -86,9 +86,20 @@ def merge_actual_and_forecast() -> pd.DataFrame:
     history = pd.read_parquet(WEATHER_HISTORY_PARQUET)
     history[RAW_DATE_COL] = pd.to_datetime(history[RAW_DATE_COL]).dt.normalize()
 
-    historical = master.merge(history, on=[RAW_DATE_COL, RAW_HOUR_COL], how="left", suffixes=(None, "_dup"))
-    dup_cols = [c for c in historical.columns if c.endswith("_dup")]
-    historical = historical.drop(columns=dup_cols)
+    # Hava kolonları için weather_history OTORİTER (Archive API ile backfill'li, tam
+    # span 0 NaN). master'da da AYNI hava kolonları bulunuyor ama 2026-07-06 korupsiyon
+    # kalıntısı olarak 06-29'dan itibaren AYDIN vb. NaN taşıyor. Eski merge
+    # suffixes=(None,"_dup") master'ı kazandırıyordu → history'nin temiz verisi düşüyor,
+    # DataManager.dropna() son ~8 günü SESSİZCE siliyordu (bayat model, silent). master'ın
+    # bu bayat hava kopyalarını merge ÖNCESİ düş; history tek kaynak. Takvim/tatil kolonları
+    # (yalnız master'da) ve target master'da kalır.
+    weather_dup = [c for c in master.columns
+                   if c in history.columns and c not in (RAW_DATE_COL, RAW_HOUR_COL)]
+    if weather_dup:
+        master = master.drop(columns=weather_dup)
+        print(f"     Master'dan {len(weather_dup)} bayat hava kolonu düşürüldü (history otoriter)")
+
+    historical = master.merge(history, on=[RAW_DATE_COL, RAW_HOUR_COL], how="left")
 
     fc = pd.read_parquet(WEATHER_FC_PARQUET)
     fc["Tarih"] = pd.to_datetime(fc["Tarih"])
@@ -146,8 +157,36 @@ def merge_actual_and_forecast() -> pd.DataFrame:
     )
     combined = combined.sort_values([RAW_DATE_COL, RAW_HOUR_COL]).reset_index(drop=True)
     combined = _backfill_calendar_columns(combined)
+    combined = _fill_missing_holiday_flags(combined)
     combined = _add_weekend_features(combined)
     return combined
+
+
+# Master'ın taşıdığı ikili tatil/takvim bayrakları. 01_ingest yeni günü SADECE
+# (Tarih, Saat, target) olarak ekler → yeni ingest edilen/forecast satırlarında bu
+# bayraklar NaN kalır. DataManager çoğunu fillna(0) yapar ama `Is_Eve` listede DEĞİL —
+# tek başına NaN kalıp o satırın dropna ile SESSİZCE düşmesine yol açıyordu (2026-07-07
+# bayat-master bug'ının ikinci katmanı). Burada hepsini NaN→0 doldur.
+# NOT: Bu, tatil OLMAYAN günler için doğru (demo penceresi 06-29→07-09 tamamen normal).
+# Gelecekte forecast penceresine denk gelen resmi/dini tatiller için Ramazan_Bayram/
+# Kurban_Bayram zaten _backfill_calendar_columns'ta takvimden hesaplanıyor; diğer
+# bayraklar (Milli_Bayram/Yilbasi/...) hâlâ master'a bağlı — takvimden türetme Faz-2 işi.
+_HOLIDAY_FLAG_COLS = [
+    "Is_lockdown", "Is_Eve", "Is_Sahur", "Is_Ramadan",
+    "weekday_after_bayram", "is_religional_holiday", "After_Bayram",
+    "Yilbasi", "before_yilbasi", "weekday_after_yilbasi",
+    "Secim_Gunu", "Milli_Bayram",
+]
+
+
+def _fill_missing_holiday_flags(df: pd.DataFrame) -> pd.DataFrame:
+    """Master'dan gelen ikili tatil bayraklarının eksiklerini (yeni ingest/forecast
+    satırları) 0 ile doldur — aksi halde `Is_Eve` gibi tek bir NaN, güncel eğitim
+    satırlarını sessizce düşürüyor."""
+    for col in _HOLIDAY_FLAG_COLS:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+    return df
 
 
 def _backfill_calendar_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -270,6 +309,23 @@ def run() -> dict:
                 msg += f"  {c}: {n} NaN\n"
             raise RuntimeError(msg)
         print("     NaN guard: OK (0 NaN)")
+
+    # FRESHNESS GUARD — en yeni actual günü eğitim setinde OLMALI. Bir hava/merge
+    # sorunu son günleri sessizce düşürürse (NaN guard 0 NaN der çünkü satır silinir,
+    # doldurulmaz) model bayat kalır ve pipeline yeşil raporlar. Bu durumu GÜRÜLTÜLÜ
+    # yakala. (bkz. 2026-07-07 bayat-master bug'ı.)
+    if train_mask.any():
+        last_actual_day = pd.Timestamp(last_actual).normalize()
+        train_days = pd.DatetimeIndex(feature_df.loc[train_mask].index).normalize()
+        train_max_day = train_days.max()
+        # hour-ending (Saat 0 -> ertesi gün 00:00) kaymasına karşı 1 gün tolerans
+        if (last_actual_day - train_max_day).days > 1:
+            raise RuntimeError(
+                f"CRITICAL: en yeni actual {last_actual_day.date()} ama eğitim "
+                f"{train_max_day.date()}'te bitiyor — son günler sessizce düşmüş "
+                f"(bayat feature). Hava/merge kaynağını kontrol et."
+            )
+        print(f"     Freshness guard: OK (eğitim son gün {train_max_day.date()}, actual {last_actual_day.date()})")
 
     n_features = feature_df.select_dtypes(include=["number", "category", "bool"]).shape[1]
     print(f"     {len(feature_df)} satır  |  {n_features} feature  |  kayıt: {FEATURE_MATRIX_PATH.name}")
