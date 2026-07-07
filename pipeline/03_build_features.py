@@ -36,20 +36,28 @@ FEATURE_MATRIX_PATH = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
 @contextlib.contextmanager
 def _suppress_dropna():
     """DataManager.load_and_preprocess() sonunda `df.dropna(inplace=True)`
-    çağırıyor — bu, hedefi NaN olan (bizim tahmin penceremiz) satırları
-    TAMAMEN siliyor. DataManager SADECE backtest için tasarlanmış (backtest'te
-    hedef her zaman bilinir, hiçbir zaman gerçek gelecek yok). Boray'ın
-    paylaşılan data_manager.py'sini değiştirmeden, SADECE bu tek çağrı
-    sırasında dropna'yı no-op yaparak forecast penceresinin hayatta kalmasını
-    sağlıyoruz (data_manager.py + yardımcı modüllerinde başka dropna çağrısı
-    olmadığı doğrulandı — grep ile kontrol edildi).
+    cagiriyor — bu, hedefi NaN olan (bizim tahmin penceremiz) satirlari
+    TAMAMEN siliyor. Patch: SADECE training row'lardaki NaN'lari temizle,
+    forecast row'lara (target=NaN) dokunma.
     """
+    from config_live import RAW_TARGET_COL
     original = pd.DataFrame.dropna
 
-    def _noop_dropna(self, *args, **kwargs):
-        return None if kwargs.get("inplace") else self.copy()
+    def _smart_dropna(self, *args, **kwargs):
+        if RAW_TARGET_COL not in self.columns:
+            return original(self, *args, **kwargs)
+        forecast_mask = self[RAW_TARGET_COL].isna()
+        forecast_rows = self[forecast_mask].copy()
+        training = self[~forecast_mask]
+        clean_kwargs = {k: v for k, v in kwargs.items() if k != "inplace"}
+        training_clean = original(training, *args, **clean_kwargs)
+        result = pd.concat([training_clean, forecast_rows]).sort_index()
+        if kwargs.get("inplace"):
+            self._update_inplace(result)
+            return None
+        return result
 
-    pd.DataFrame.dropna = _noop_dropna
+    pd.DataFrame.dropna = _smart_dropna
     try:
         yield
     finally:
