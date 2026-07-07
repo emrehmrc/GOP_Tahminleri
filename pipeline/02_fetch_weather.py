@@ -149,7 +149,7 @@ def _update_weather_history(result: pd.DataFrame):
     
     # Sadece YENI (Tarih,Saat) kombinasyonlarını ekle — mevcutları ezme!
     existing_keys = set(
-        (str(d.date()), int(h)) 
+        (str(pd.Timestamp(d).date()), int(h)) 
         for d, h in zip(wh["Tarih"].values, wh["Saat"].values)
     )
     really_new = new_data[
