@@ -134,8 +134,8 @@ def to_tarih_saat(df: pd.DataFrame) -> pd.DataFrame:
 
 def _update_weather_history(result: pd.DataFrame):
     """weather_fc_live'in ilk 24 saatini weather_history.parquet'e upsert et.
-    Eksik günlerin weather verisi forecast'tan gelir — actual'lar periyodik
-    Archive API sync ile tamamlanır."""
+    SADECE yeni (Tarih,Saat) çiftleri eklenir — mevcut satırlar KORUNUR.
+    Eksik _actual kolonları fix_weather_history.py ile Archive API'den doldurulur."""
     if not WEATHER_HISTORY_PARQUET.exists():
         print("     [weather_history] dosya yok, oluşturuluyor...")
         result.iloc[:24].to_parquet(WEATHER_HISTORY_PARQUET, index=False)
@@ -146,14 +146,34 @@ def _update_weather_history(result: pd.DataFrame):
 
     # Sadece history'de common olan sütunları al
     new_data = new_rows[[c for c in wh.columns if c in new_rows.columns]].copy()
-    for c in wh.columns:
-        if c not in new_data.columns:
-            new_data[c] = None
+    
+    # Sadece YENI (Tarih,Saat) kombinasyonlarını ekle — mevcutları ezme!
+    existing_keys = set(
+        (str(d.date()), int(h)) 
+        for d, h in zip(wh["Tarih"].values, wh["Saat"].values)
+    )
+    really_new = new_data[
+        ~new_data.apply(
+            lambda r: (
+                str(pd.Timestamp(r["Tarih"]).date()), 
+                int(r["Saat"])
+            ) in existing_keys, 
+            axis=1
+        )
+    ]
+    
+    if len(really_new) == 0:
+        print(f"     [weather_history] tum satirlar zaten var — atlandi ({len(wh)} satir)")
+        return
 
-    combined = pd.concat([wh, new_data[wh.columns]], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["Tarih", "Saat"], keep="last")
+    for c in wh.columns:
+        if c not in really_new.columns:
+            really_new[c] = np.nan
+
+    combined = pd.concat([wh, really_new[wh.columns]], ignore_index=True)
+    combined = combined.sort_values(["Tarih", "Saat"]).reset_index(drop=True)
     combined.to_parquet(WEATHER_HISTORY_PARQUET, index=False)
-    print(f"     [weather_history] güncellendi: {len(combined)} satır")
+    print(f"     [weather_history] {len(really_new)} yeni satir eklendi → {len(combined)} satir")
 
 
 def _overlay_past_hours_from_archive(result: pd.DataFrame) -> pd.DataFrame:
