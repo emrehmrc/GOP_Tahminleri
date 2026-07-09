@@ -159,7 +159,7 @@ ENABLE_A3_FEATURES = True
 
 # ── Feature toggle'ları ───────────────────────────────────────────────────────
 ENABLE_HOLIDAY_LAG_CLEAN = True
-ENABLE_THERMAL_FEATURES  = False
+ENABLE_THERMAL_FEATURES  = True
 
 # ── Model dosyaları ───────────────────────────────────────────────────────────
 MODEL_XGB_PATH      = MODELS_DIR / "live_xgboost.json"

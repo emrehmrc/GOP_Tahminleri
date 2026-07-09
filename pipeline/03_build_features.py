@@ -291,7 +291,22 @@ def run() -> dict:
 
     # Özellik matrisini kaydet
     FEATURE_MATRIX_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # GHI x Sicaklik etkilesim feature'lari (Faz 2.2)
+    ghi_cols = [c for c in feature_df.columns if 'GHI' in c and 'Weighted' in c]
+    temp_cols = [c for c in feature_df.columns if 'Hissedilen' in c and 'Mean' in c]
+    if ghi_cols and temp_cols:
+        ghi = feature_df[ghi_cols[0]]
+        temp = feature_df[temp_cols[0]]
+        feature_df['GHI_Temp_Interaction'] = ghi * temp / 100
+        feature_df['Hot_Solar_GHI'] = ((temp > 28) & (feature_df['Saat'].between(11, 16))).astype(float) * ghi
+        feature_df['Cold_Solar_GHI'] = ((temp < 10) & (feature_df['Saat'].between(10, 15))).astype(float) * ghi
+        print(f"     GHIxSicaklik etkilesim feature'lari eklendi: GHI={ghi_cols[0]}, Temp={temp_cols[0]}")
+
+    feature_df_old = feature_df  # rename for NaN guard
+    feature_df = feature_df.copy()  # de-fragment
     feature_df.to_parquet(FEATURE_MATRIX_PATH)
+    feature_df = feature_df_old  # restore for guards below
 
     # NaN GUARD — training rows'da NaN feature varsa pipeline durur
     train_mask = feature_df[RAW_TARGET_COL].notna()
