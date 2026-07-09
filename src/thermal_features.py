@@ -287,7 +287,19 @@ def add_thermal_features(df: pd.DataFrame) -> pd.DataFrame:
     try:
         import sys, os
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        import config_live as cfg
+        import config_live as cfg_raw
+        # Eksik config attribute'lari icin default degerler
+        _THRESHOLD_DEFAULTS = {'CDD_STREAK_THRESHOLD': 5, 'HDD_STREAK_THRESHOLD': 5,
+            'TROPICAL_NIGHT_THRESHOLD': 20, 'HIGH_HUMIDITY_THRESHOLD': 70,
+            'HOT_THRESHOLD': 28, 'WIND_STILL_THRESHOLD': 1}
+        class _CfgWrapper:
+            pass
+        cfg = _CfgWrapper()
+        all_attrs = set(dir(cfg_raw)) | set(_THRESHOLD_DEFAULTS.keys())
+        for name in all_attrs:
+            val = getattr(cfg_raw, name, _THRESHOLD_DEFAULTS.get(name))
+            if val is not None:
+                setattr(cfg, name, val)
     except ImportError:
         print("[ThermalFeatures] config.py import hatası — tüm gruplar atlandı.")
         return df
