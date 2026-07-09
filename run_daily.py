@@ -149,6 +149,13 @@ def main():
         except Exception as e:
             log.warning(f"Diagnostic HTML hatası (teslimi etkilemez): {e}")
 
+        # Adım 09 — Email rapor (SMTP ayarları yapılandırılmışsa)
+        try:
+            result09 = run_step("09_EMAIL", _step_import("09_email_report").run)
+            summary["steps"]["09_email"] = result09
+        except Exception as e:
+            log.warning(f"Email rapor hatası (teslimi etkilemez): {e}")
+
         summary["status"] = "ok"
         log.info(f"\n✓ Pipeline tamamlandı. Teslim: {result06.get('output_file', '?')}")
 
