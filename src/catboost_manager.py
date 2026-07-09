@@ -73,7 +73,6 @@ class CatBoostManager:
         if not cat_features_names:
             KNOWN_CATEGORICAL = [
                 'Haftanın_Günü',   # 0-6
-                'Saat',            # 0-23 (cyclic)
                 'Ay',              # 1-12
                 'Gün',             # 1-31
                 'Yıl',             # 2018-2026
