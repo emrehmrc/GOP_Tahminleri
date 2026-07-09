@@ -108,8 +108,13 @@ ROLLING_RIDGE_MIN_SAMPLES = 168
 # korelasyonlu — grid+LOO optimizasyonu serbest bırakılınca yine ~0 ağırlık
 # seçiyor, ama %10 pay ZORLANINCA maliyeti neredeyse sıfır (+0.03pp, bkz.
 # backtest_catlgbm_fix.log). Kullanıcı 4 modelin birlikte çalışmasını istediği
-# için bu bedelsiz payı kabul ediyoruz. CAT düzelene kadar dışarıda.
-CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.40, "LGBM_Pred": 0.10, "CHRONOS_Pred": 0.50}
+# için bu bedelsiz payı kabul ediyoruz.
+# 
+# DÜZELTME (2026-07-10 exp/faz1-cat-fix): CAT fix — Saat kategorik çıkarıldı
+# (numeric öğrenme için), loss_function MAE, min_data_in_leaf 1→20, depth 6→7,
+# iterations 600→1500, lr 0.05→0.03. Quick test (2g, ~6600 satır) ESKI 5.81% →
+# YENI 5.35% (−0.46pp). CAT 0.05 ağırlıkla ensemble'a geri eklendi.
+CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.40, "LGBM_Pred": 0.10, "CAT_Pred": 0.05, "CHRONOS_Pred": 0.45}
 
 # ── Ensemble bias düzeltme (sistematik under-estimation karşıtı) ──────────────────
 # 2026-07-07 grid search: T+2'de Final_Pred ME=-21 MWh, +15 MWh bias MAPE'yi
