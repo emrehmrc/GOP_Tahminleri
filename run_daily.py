@@ -142,6 +142,13 @@ def main():
         except Exception as e:
             log.warning(f"STLF Rapor hatası (teslimi etkilemez): {e}")
 
+        # Adım 08 — STLF DIAGNOSTIC HTML (Chart.js gösterge paneli)
+        try:
+            result08 = run_step("08_DIAGNOSTIC", _step_import("08_diagnostic_html").run)
+            summary["steps"]["08_diagnostic"] = result08
+        except Exception as e:
+            log.warning(f"Diagnostic HTML hatası (teslimi etkilemez): {e}")
+
         summary["status"] = "ok"
         log.info(f"\n✓ Pipeline tamamlandı. Teslim: {result06.get('output_file', '?')}")
 
