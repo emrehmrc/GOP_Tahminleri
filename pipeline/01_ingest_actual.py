@@ -90,7 +90,8 @@ def load_source_csv(path: Path) -> pd.DataFrame:
         decimal_sep = ","
     energy_vals = energy_str.str.replace(",", ".", regex=False).astype(float)
 
-    dt = pd.to_datetime(df["Starts dd.mm.YYYY HH:MM"], format="%d.%m.%Y %H:%M")
+    date_str = df["Starts dd.mm.YYYY HH:MM"].astype(str).str.replace(",", ".", regex=False)
+    dt = pd.to_datetime(date_str, format="%d.%m.%Y %H:%M")
 
     out = pd.DataFrame({
         RAW_DATE_COL: dt.dt.normalize(),
@@ -141,7 +142,8 @@ def check_gap(new_date, master: pd.DataFrame):
 
 
 def append_to_master(new_df: pd.DataFrame) -> pd.DataFrame:
-    """Yeni satırları master.parquet'e upsert et (Tarih+Saat anahtarıyla)."""
+    """Yeni satırları master.parquet'e upsert et (Tarih+Saat anahtarıyla).
+    Atomic write: önce .tmp, sonra rename → crash'e karşı korumalı."""
     if MASTER_PARQUET.exists():
         master = pd.read_parquet(MASTER_PARQUET)
         master[RAW_DATE_COL] = pd.to_datetime(master[RAW_DATE_COL])
@@ -156,7 +158,9 @@ def append_to_master(new_df: pd.DataFrame) -> pd.DataFrame:
     combined = combined.sort_values([RAW_DATE_COL, RAW_HOUR_COL]).reset_index(drop=True)
 
     MASTER_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_parquet(MASTER_PARQUET, index=False)
+    tmp_path = MASTER_PARQUET.with_suffix(".parquet.tmp")
+    combined.to_parquet(tmp_path, index=False)
+    tmp_path.rename(MASTER_PARQUET)
     return combined
 
 

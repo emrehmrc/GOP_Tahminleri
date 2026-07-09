@@ -17,14 +17,14 @@ from datetime import date
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-# ── SMTP Konfigurasyonu (KENDI BILGILERINLE DEGISTIR) ─────────────
-SMTP_HOST = "smtp.mrc-tr.com"       # MRC mail sunucusu
-SMTP_PORT = 587                      # TLS port
-SMTP_USER = "your-email@mrc-tr.com"  # Email adresin
-SMTP_PASS = "your-password"          # Email sifren
+# ── SMTP Konfigurasyonu (env var ile) ──────────────────────────────
+SMTP_HOST = os.getenv("STLF_SMTP_HOST")
+SMTP_PORT = int(os.getenv("STLF_SMTP_PORT", "587"))
+SMTP_USER = os.getenv("STLF_SMTP_USER")
+SMTP_PASS = os.getenv("STLF_SMTP_PASS")
 
 TO = ["emre.hangul@mrc-tr.com", "cagatay.bayrak@mrc-tr.com"]
-FROM = SMTP_USER
+FROM = SMTP_USER or "stlf@mrc-tr.com"
 
 # ── Dosya yollari ──────────────────────────────────────────────────
 from config_live import OUTPUT_DIR
@@ -39,8 +39,8 @@ def run() -> dict:
     """
     print("\n[09] STLF EMAIL gonderiliyor...")
 
-    if not SMTP_HOST or SMTP_HOST == "smtp.mrc-tr.com":
-        print("     SMTP ayarlari yapilmamis — email atlandi.")
+    if not SMTP_HOST or not SMTP_USER:
+        print("     SMTP ayarları yapılmamış (env: STLF_SMTP_HOST/USER/PASS) — email atlandı.")
         return {"status": "skipped", "reason": "SMTP not configured"}
 
     # Mesaj olustur

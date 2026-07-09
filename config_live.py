@@ -215,8 +215,6 @@ PV_BIAS_FALLBACK_ENABLED = True
 POST_HOLIDAY_MULTIPLIERS_T1 = {"religious_post_1": 1.0540, "religious_post_2_3": 0.9890}
 POST_HOLIDAY_MULTIPLIERS_T2 = {"religious_post_1": 1.1370, "religious_post_2_3": 1.0460}
 
-ENABLE_T2_BIAS_CORRECTION  = False
-ENABLE_T2_RIDGE_CORRECTION = False
 T2_STRATEGY_MODE = "separate"
 ADAPTIVE_STRATEGY = "rolling_ridge"
 

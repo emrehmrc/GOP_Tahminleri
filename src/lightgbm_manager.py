@@ -8,13 +8,8 @@ import matplotlib.pyplot as plt
 
 import config_live
 from config_live import MODEL_NAME
+from src.metrics import calculate_mape
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-def calculate_mape(y_true, y_pred):
-    epsilon = 1e-10
-    y_true, y_pred = np.array(y_true), np.array(y_pred)
-    mape = np.mean(np.abs((y_true - y_pred) / (y_true + epsilon))) * 100
-    return mape
 
 class HybridLightGBMModel:
     def __init__(self, model_wd_sat, model_we):
