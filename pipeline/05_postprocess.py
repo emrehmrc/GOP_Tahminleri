@@ -41,10 +41,8 @@ POSTPROC_PATH          = DATA_DIR / "weather_cache" / "postprocessed_predictions
 
 
 def _add_local_src_path():
-    src_path = str(ROOT / "src")
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-
+    from src.common import add_local_src_path as _p
+    _p(ROOT)
 
 def apply_holiday_substitution(preds: pd.Series, feature_df: pd.DataFrame, predict_idx) -> pd.Series:
     """Tatil substitution — donmuş alpha tablosunu yükleyip uygula."""

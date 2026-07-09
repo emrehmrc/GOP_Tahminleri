@@ -42,9 +42,8 @@ WX_TEMP_COLS = [f"{s}_app_temp_actual" for s in WEATHER_STATIONS]
 
 
 def _add_local_src_path():
-    src_path = str(ROOT / "src")
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
+    from src.common import add_local_src_path as _p
+    _p(ROOT)
 
 
 # ── Split ────────────────────────────────────────────────────────────────────

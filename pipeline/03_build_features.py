@@ -64,11 +64,7 @@ def _suppress_dropna():
         pd.DataFrame.dropna = original
 
 
-def _add_local_src_path():
-    src_path = str(ROOT / "src")
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-
+from src.common import add_local_src_path as _add_local_src_path
 
 def merge_actual_and_forecast() -> pd.DataFrame:
     """
