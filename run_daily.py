@@ -57,6 +57,7 @@ def main():
                         help="Teslim günü YYYY-MM-DD (varsayılan: yarın = T+2)")
     parser.add_argument("--skip-ingest",  action="store_true", help="Adım 01 atla")
     parser.add_argument("--skip-weather", action="store_true", help="Adım 02 atla")
+    parser.add_argument("--skip-features", action="store_true", help="Adım 03 atla")
     parser.add_argument("--dry-run", action="store_true",
                         help="Sadece 01-03 çalıştır (tahmin üretme)")
     args = parser.parse_args()
@@ -84,7 +85,11 @@ def main():
         summary["steps"]["02_weather"] = result02
 
         # Adım 03 — Features
-        result03 = run_step("03_FEATURES", _step_import("03_build_features").run)
+        if not args.skip_features:
+            result03 = run_step("03_FEATURES", _step_import("03_build_features").run)
+        else:
+            log.info("03_FEATURES atlandı (--skip-features)")
+            result03 = {"status": "skipped"}
         summary["steps"]["03_features"] = result03
 
         if args.dry_run:
@@ -129,6 +134,13 @@ def main():
             summary["steps"]["alerts"] = {"count": len(alerts)}
         except Exception as e:
             log.warning(f"Scorecard/alarm hatası (teslimi etkilemez): {e}")
+
+        # Adım 07 — STLF LIVE RAPOR (Excel, her run sonrası güncellenir)
+        try:
+            result07 = run_step("07_REPORT", _step_import("07_report_excel").run)
+            summary["steps"]["07_report"] = result07
+        except Exception as e:
+            log.warning(f"STLF Rapor hatası (teslimi etkilemez): {e}")
 
         summary["status"] = "ok"
         log.info(f"\n✓ Pipeline tamamlandı. Teslim: {result06.get('output_file', '?')}")
