@@ -243,6 +243,49 @@ def _overlay_past_hours_from_archive(result: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _check_recent_weather_completeness(days: int = 10):
+    """weather_history'de son `days` günün _actual hava kolonlarında NaN kalmış mı
+    kontrol et; kalmışsa o gün(ler) için tek hedefli re-backfill dene, sonra hâlâ
+    eksikse gürültülü uyar. Pipeline'ı DÜŞÜRMEZ (03 zaten guard'lıyor)."""
+    if not WEATHER_HISTORY_PARQUET.exists():
+        return
+    wh = pd.read_parquet(WEATHER_HISTORY_PARQUET)
+    wh["Tarih"] = pd.to_datetime(wh["Tarih"])
+    # _actual hava kolonları (dün ve öncesi gerçekleşmiş; bugün Archive'da yok, hariç)
+    wx_cols = [c for c in wh.columns if c.endswith("_actual")]
+    if not wx_cols:
+        return
+    cutoff = pd.Timestamp(date.today() - timedelta(days=days))
+    yesterday = pd.Timestamp(date.today() - timedelta(days=1))
+    recent = wh[(wh["Tarih"] >= cutoff) & (wh["Tarih"] <= yesterday)]
+    if recent.empty:
+        return
+    per_day = recent.groupby(recent["Tarih"].dt.date)[wx_cols].apply(lambda x: int(x.isna().sum().sum()))
+    bad_days = per_day[per_day > 0]
+    if bad_days.empty:
+        print(f"     [weather_completeness] OK (son {days} gün hava tam)")
+        return
+
+    print(f"     [weather_completeness] {len(bad_days)} günde eksik hava — hedefli re-backfill deneniyor: {list(bad_days.index)}")
+    try:
+        import fix_weather_history as FWH
+        FWH.run(str(min(bad_days.index)), str(max(bad_days.index)))
+    except Exception as e:
+        print(f"     [weather_completeness] re-backfill hatası: {e}")
+
+    # Tekrar ölç
+    wh2 = pd.read_parquet(WEATHER_HISTORY_PARQUET)
+    wh2["Tarih"] = pd.to_datetime(wh2["Tarih"])
+    recent2 = wh2[(wh2["Tarih"] >= cutoff) & (wh2["Tarih"] <= yesterday)]
+    still = recent2.groupby(recent2["Tarih"].dt.date)[wx_cols].apply(lambda x: int(x.isna().sum().sum()))
+    still_bad = still[still > 0]
+    if not still_bad.empty:
+        print(f"     [weather_completeness] ⚠ UYARI: hâlâ eksik hava var → {dict(still_bad)} "
+              f"(03_FEATURES bu günleri eğitimden düşürebilir — Archive API gecikmesi olabilir)")
+    else:
+        print(f"     [weather_completeness] re-backfill sonrası tam.")
+
+
 def run() -> dict:
     """
     Adım 02 — weather forecast.
@@ -288,6 +331,17 @@ def run() -> dict:
         print(f"     [weather_history_backfill] {fwh_result}")
     except Exception as e:
         print(f"     [weather_history_backfill] Uyarı (pipeline devam ediyor): {e}")
+
+    # ── Bütünlük emniyet kemeri (2026-07-07) ──────────────────────────────────
+    # Backfill'den sonra son 10 günün _actual hava kolonlarında NaN kalmışsa
+    # (Archive API bir istasyonu döndürmediyse) 03_FEATURES'ın freshness/NaN
+    # guard'ı sabah gözetimsiz koşuyu sürprizle patlatır. Eksik gün(ler) için TEK
+    # hedefli re-backfill dene; hâlâ eksikse GÜRÜLTÜLÜ uyar (pipeline'ı düşürme —
+    # 03 zaten yakalar, ama burada erken/görünür sinyal veriyoruz).
+    try:
+        _check_recent_weather_completeness(days=10)
+    except Exception as e:
+        print(f"     [weather_completeness] Uyarı (pipeline devam ediyor): {e}")
 
     # Faz 0: actuals_log hava gerçekleşme dalgası (~D+6, weather_history'de dolan _actual'lar)
     try:

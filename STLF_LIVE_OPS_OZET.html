@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>STLF Live-Ops Yol Haritası — Yönetici Özeti</title>
+<style>
+  :root{
+    --navy:#0f2740; --blue:#1d5c9e; --teal:#0e8a7d; --amber:#c9812f;
+    --red:#c0392b; --gray:#5a6b7a; --bg:#f4f6f8; --card:#ffffff; --border:#e1e6ea;
+  }
+  *{box-sizing:border-box;}
+  body{
+    font-family:"Segoe UI",Arial,sans-serif; margin:0; background:var(--bg); color:#1c2b36;
+    line-height:1.5;
+  }
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 80px;}
+  header{margin-bottom:28px;}
+  header h1{font-size:26px;color:var(--navy);margin:0 0 6px;}
+  header p.sub{color:var(--gray);margin:0;font-size:15px;}
+  .kpi-row{display:flex;gap:16px;margin:24px 0;flex-wrap:wrap;}
+  .kpi{
+    flex:1;min-width:180px;background:var(--card);border:1px solid var(--border);
+    border-radius:10px;padding:16px 18px;box-shadow:0 1px 3px rgba(0,0,0,.04);
+  }
+  .kpi .label{font-size:12px;color:var(--gray);text-transform:uppercase;letter-spacing:.04em;}
+  .kpi .value{font-size:22px;font-weight:700;color:var(--navy);margin-top:4px;}
+  .kpi .value.red{color:var(--red);}
+  .kpi .value.teal{color:var(--teal);}
+
+  section{margin-bottom:32px;}
+  h2{font-size:18px;color:var(--navy);border-bottom:2px solid var(--border);padding-bottom:8px;margin-bottom:16px;}
+
+  .problem-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  @media(max-width:700px){.problem-grid{grid-template-columns:1fr;}}
+  .problem-card{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--red);border-radius:8px;padding:14px 16px;}
+  .problem-card h3{margin:0 0 6px;font-size:14px;color:var(--red);}
+  .problem-card p{margin:0;font-size:13.5px;color:#33444f;}
+
+  .timeline{position:relative;padding-left:28px;}
+  .timeline::before{content:"";position:absolute;left:9px;top:6px;bottom:6px;width:2px;background:var(--border);}
+  .phase{position:relative;margin-bottom:18px;}
+  .phase::before{
+    content:"";position:absolute;left:-28px;top:4px;width:16px;height:16px;border-radius:50%;
+    background:var(--card);border:3px solid var(--blue);
+  }
+  .phase.done::before{border-color:var(--teal);background:var(--teal);}
+  .phase-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+  .phase-head .tag{font-size:11px;font-weight:700;padding:2px 8px;border-radius:12px;background:#e8f0fa;color:var(--blue);}
+  .phase.done .phase-head .tag{background:#e2f5f2;color:var(--teal);}
+  .phase-head h3{margin:0;font-size:15.5px;color:var(--navy);}
+  .phase-head .eta{font-size:12px;color:var(--gray);margin-left:auto;}
+  .phase p{margin:6px 0 0;font-size:13.5px;color:#33444f;}
+  .phase .why{font-size:12.5px;color:var(--gray);font-style:italic;margin-top:4px;}
+
+  .status-badge{display:inline-block;font-size:11px;font-weight:700;padding:3px 10px;border-radius:12px;margin-left:8px;}
+  .status-done{background:#e2f5f2;color:var(--teal);}
+  .status-todo{background:#fbeee0;color:var(--amber);}
+
+  table{width:100%;border-collapse:collapse;font-size:13.5px;background:var(--card);border-radius:8px;overflow:hidden;}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--border);}
+  th{background:#eef2f5;color:var(--navy);font-size:12px;text-transform:uppercase;letter-spacing:.03em;}
+  tr:last-child td{border-bottom:none;}
+
+  .callout{
+    background:#fff8ec;border:1px solid #f0dcb0;border-left:4px solid var(--amber);
+    border-radius:8px;padding:14px 16px;font-size:13.5px;
+  }
+  .callout b{color:var(--amber);}
+
+  .qlist{list-style:none;padding:0;margin:0;display:grid;gap:10px;}
+  .qlist li{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:13.5px;}
+  .qlist li b{color:var(--navy);}
+
+  footer{color:var(--gray);font-size:12px;text-align:center;margin-top:40px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>STLF Live-Ops Yol Haritası</h1>
+    <p class="sub">Deneysel/notebook kökenli tahmin sisteminden, izlenebilir &amp; aksiyon alınabilir bir canlı ürüne geçiş planı — özet görünüm</p>
+  </header>
+
+  <div class="kpi-row">
+    <div class="kpi">
+      <div class="label">Ana Hedef</div>
+      <div class="value">MAPE ↓</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Asıl Amaç</div>
+      <div class="value teal">15 dk'da "neden?"</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Toplam Faz</div>
+      <div class="value">7 (−1 → 5)</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Şu An</div>
+      <div class="value red">Faz 2 başlangıcı</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Neden bu proje gerekli?</h2>
+    <div class="problem-grid">
+      <div class="problem-card">
+        <h3>Tekrarlanabilirlik yok</h3>
+        <p>Kod git'te değil, config hash'lenmiyor, model dosyaları her gün üzerine yazılıyor. "3 hafta önceki tahmin hangi ayarla üretildi?" sorusu bugün cevaplanamıyor.</p>
+      </div>
+      <div class="problem-card">
+        <h3>Sessiz hatalar</h3>
+        <p>Chronos modeli patlarsa fark ettirmeden XGB kopyası yazılıyor; CatBoost yüklenemezse sessizce atlanıyor. Kimse bilmiyor.</p>
+      </div>
+      <div class="problem-card">
+        <h3>Trend izlenemiyor</h3>
+        <p>MAPE hesabı kümülatif tutuluyor — günlük performans trendi göremiyoruz, kötü bir günü tek başına tespit edemiyoruz.</p>
+      </div>
+      <div class="problem-card">
+        <h3>İzleme paneli yok</h3>
+        <p>Mevcut ekran sadece operasyon aracı (veri yükleme/tahmin üretme); performans/analiz sayfası hiç yok.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Hedef Mimari (Katmanlar)</h2>
+    <table>
+      <tr><th>Katman</th><th>İçerik</th><th>Faz</th></tr>
+      <tr><td>UI</td><td>Streamlit çok sayfalı panel (Operasyon / İzleme / Deney)</td><td>Faz 3</td></tr>
+      <tr><td>Analiz</td><td>Günlük skor kartı, istatistiksel alarm (z-score/CUSUM), sürüklenme tespiti, kötü gün triyajı</td><td>Faz 1-2-4</td></tr>
+      <tr><td>Log Deposu</td><td>Tahmin ve gerçekleşme kayıtları (parquet + DuckDB), olay kayıtları</td><td>Faz 0</td></tr>
+      <tr><td>Pipeline</td><td>Mevcut 6 adım + run kimliği/config imzası + gölge (shadow) çalıştırma</td><td>Mevcut + Faz 4</td></tr>
+      <tr><td>Temel Hijyen</td><td>Git deposu, bağımlılık kilidi, model arşivi</td><td>Faz -1</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Faz Faz Yol Haritası</h2>
+    <div class="timeline">
+
+      <div class="phase done">
+        <div class="phase-head"><span class="tag">Faz -1</span><h3>Temel Hijyen</h3><span class="status-badge status-done">Tamamlandı</span><span class="eta">~1-2 gün</span></div>
+        <p>Git deposu kuruldu, model arşivleme ve versiyon takibinin zemini atıldı.</p>
+      </div>
+
+      <div class="phase done">
+        <div class="phase-head"><span class="tag">Faz 0</span><h3>Günlük Log Altyapısı</h3><span class="status-badge status-done">Tamamlandı</span><span class="eta">~3-5 gün</span></div>
+        <p>Her tahminin bileşenlerinin (model payları, düzeltme adımları, kullanılan hava verisi) kalıcı olarak kaydedilmesi.</p>
+        <p class="why">Neden: "neden" sorusunun hammaddesi — anlık yakalanmazsa geri getirilemez.</p>
+      </div>
+
+      <div class="phase done">
+        <div class="phase-head"><span class="tag">Faz 1</span><h3>Günlük Skor Kartı + Çoklu Pencere Analizi</h3><span class="status-badge status-done">Tamamlandı</span><span class="eta">~4-6 gün</span></div>
+        <p>Günlük/haftalık/aylık/yıllık performans raporları, istatistiksel alarm eşiği, "gerçek hava ile yeniden tahmin" testi (model mi hava mı suçlu ayrımı).</p>
+      </div>
+
+      <div class="phase">
+        <div class="phase-head"><span class="tag">Faz 2</span><h3>"Kötü Gün" Triyaj Protokolü</h3><span class="status-badge status-todo">Sırada</span><span class="eta">~2-3 gün</span></div>
+        <p>Kötü bir gün tespit edildiğinde otomatik teşhis raporu üretilir, insan kısa sürede "verdict" (karar) girer.</p>
+        <p class="why">Neden: Aylık kalite raporlarının ve gelecek geliştirme önceliklerinin hammaddesi.</p>
+      </div>
+
+      <div class="phase">
+        <div class="phase-head"><span class="tag">Faz 3</span><h3>İzleme Paneli (Dashboard) MVP</h3><span class="status-badge status-todo">Sırada</span><span class="eta">~4-6 gün</span></div>
+        <p>Mevcut panele "İzleme" ve "Deney" sekmeleri eklenir — trend grafikleri, model bazlı performans, ısı haritaları.</p>
+        <p class="why">Neden: Günlük 5-10 dakikalık insan gözden geçirmesinin aracı.</p>
+      </div>
+
+      <div class="phase">
+        <div class="phase-head"><span class="tag">Faz 4</span><h3>Sürüklenme Tespiti + Model Yarışması (Champion-Challenger)</h3><span class="status-badge status-todo">Sırada</span><span class="eta">~1.5-2 hafta</span></div>
+        <p>Sinsi bias kaymalarını yakalayan sürekli alarm; yeni model/özellik denemelerinin canlıya güvenle alınması için "gölge modda test et, kanıtlanmadan geçirme" disiplini.</p>
+        <p class="why">Neden: "Backtest'te iyiydi" tek başına canlıya alma gerekçesi olamaz — gerçek trafik olmadan da güvenli test şart.</p>
+      </div>
+
+      <div class="phase">
+        <div class="phase-head"><span class="tag">Faz 5</span><h3>Çoklu Dağıtım Şirketi (EDAŞ) Genişlemesi</h3><span class="status-badge status-todo">Sırada</span><span class="eta">~2-3 hafta (GDZ netleşince)</span></div>
+        <p>Sistemin ADM dışında başka dağıtım şirketlerine (örn. GDZ) genişletilebilmesi için mimari hazırlık.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Kararı Bekleyen Konular</h2>
+    <ul class="qlist">
+      <li><b>Log verisi nerede saklanacak?</b> — OneDrive'da kalması riskli (kilitlenme ihtimali); yerel diske alıp yedeği OneDrive'a atma öneriliyor.</li>
+      <li><b>Alarm nereye düşecek?</b> — Şu an hiçbir kanal yok (e-posta / Teams / sadece panel?).</li>
+      <li><b>Gölge model test bütçesi</b> — Yeni model denemelerinin günlük ek işlem süresi (~1 saat) kabul edilebilir mi?</li>
+      <li><b>Olay kayıtları (kesinti, arıza vb.) kim girecek?</b> — Saha ekibiyle organizasyonel bir karar gerektiriyor.</li>
+    </ul>
+  </section>
+
+  <div class="callout">
+    <b>Özet:</b> Pipeline'ın kendisi zaten sağlam kurgulanmış. Eksik olan, sistemin kendi performansını izleyip
+    sorunları erken yakalaması ve yeni geliştirmelerin güvenle test edilebilmesi — bu doküman bunun adım adım planı.
+    Faz -1, 0 ve 1 tamamlandı; sırada kötü gün triyajı ve izleme paneli var.
+  </div>
+
+  <footer>STLF Live-Ops Yol Haritası — özet görünüm · Kaynak: STLF_LIVE_OPS_ROADMAP.md (2026-07-04)</footer>
+</div>
+</body>
+</html>

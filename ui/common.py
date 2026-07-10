@@ -11,6 +11,7 @@ benzersiz sys.modules anahtarını alıyor, çakışma imkansız.
 """
 
 import sys
+import subprocess
 import importlib.util
 from pathlib import Path
 from datetime import date
@@ -21,6 +22,7 @@ import streamlit as st
 UI_DIR   = Path(__file__).parent
 LIVE_DIR = UI_DIR.parent
 GDZ_DIR  = LIVE_DIR.parent / "gdz talep"
+GDZ_LIVE_DIR = GDZ_DIR / "live"
 
 if str(LIVE_DIR) not in sys.path:
     sys.path.insert(0, str(LIVE_DIR))
@@ -47,6 +49,53 @@ def import_gdz_ingest():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+# ── GDZ canlı pipeline — SUBPROCESS ile (in-process DEĞİL) ────────────────────
+# GEREKÇE: ADM'nin bu dosyanın (ve tab_tahmin_uret.py'nin) modül-seviyesinde bare
+# `from run_context import ...` / `from forecast_logger import ...` importları var —
+# bunlar sys.modules'a ADM'nin versiyonuyla cache'leniyor. GDZ'nin `live/src/`
+# altında AYNI isimde ama farklı içerikli (config_live_gdz'ye bağlı) kendi
+# run_context.py/forecast_logger.py'si var; GDZ'nin pipeline script'leri de bu
+# isimleri bare import ediyor. Aynı process'te çalıştırılırsa Python sys.modules'da
+# zaten cache'li ADM versiyonunu döndürür — GDZ kodu yanlış (ADM şemalı) fonksiyonları
+# çağırmış olur (sessiz, tehlikeli çakışma). Subprocess = ayrı sys.modules = risk yok.
+def gdz_stdout_path(for_date: date | None = None) -> Path:
+    d = for_date or date.today()
+    return GDZ_LIVE_DIR / "logs" / f"{d}_ui_subprocess.log"
+
+
+def run_gdz_pipeline_async(args: list[str]) -> subprocess.Popen:
+    """gdz talep/live/run_daily.py'yi subprocess olarak başlatır (non-blocking).
+
+    stdout/stderr bir DOSYAYA yönlenir, subprocess.PIPE'a DEĞİL. DÜZELTME
+    (2026-07-07, canlı gözlemlendi): PIPE ile başlatılıp UI tarafında hiç
+    okunmayınca (sadece ayrı run.log dosyası tail'leniyordu) OS pipe buffer'ı
+    dolup GDZ'nin print() çağrıları sonsuza kadar bloke oldu — process canlı
+    görünüyordu ama 03_FEATURES'ta 16+ dakika ilerlemesiz kaldı (klasik
+    subprocess PIPE-deadlock). Dosyaya yönlendirme bu riski komple ortadan
+    kaldırır (parent okusun/okumasın, child'ın yazması asla bloke olmaz) —
+    hem POSIX hem Windows'ta subprocess modülünün resmi/güvenli deseni.
+    """
+    stdout_path = gdz_stdout_path()
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(stdout_path, "w", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            [sys.executable, str(GDZ_LIVE_DIR / "run_daily.py"), *args],
+            cwd=str(GDZ_LIVE_DIR),
+            stdout=f, stderr=subprocess.STDOUT, text=True,
+        )
+    return proc
+
+
+def gdz_log_path(for_date: date | None = None) -> Path:
+    d = for_date or date.today()
+    return GDZ_LIVE_DIR / "logs" / f"{d}_run.log"
+
+
+def gdz_summary_path(for_date: date | None = None) -> Path:
+    d = for_date or date.today()
+    return GDZ_LIVE_DIR / "logs" / f"{d}_summary.json"
 
 
 # ── Güncellik eşikleri ────────────────────────────────────────────────────────

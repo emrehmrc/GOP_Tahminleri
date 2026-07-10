@@ -288,7 +288,8 @@ def check_alerts(z_threshold: float | None = None) -> list[dict]:
 
     if alerts:
         C.ALERTS_DIR.mkdir(parents=True, exist_ok=True)
-        path = C.ALERTS_DIR / f"{latest_date}.json"
+        date_str = pd.Timestamp(latest_date).strftime("%Y-%m-%d")
+        path = C.ALERTS_DIR / f"{date_str}.json"
         path.write_text(json.dumps(alerts, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         log.warning(f"[Alert] {len(alerts)} alarm -> {path}")
 

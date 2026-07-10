@@ -5,6 +5,7 @@ LIVE_DATA_DIR / DD.MM / subfolder yapısından otomatik tarama,
 önizleme, onay ve commit. Her gün ayrı ayrı veya toplu işlenebilir.
 """
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from common import (
     LIVE_DATA_DIR, MASTER_PARQUET,
     import_pipeline_step, import_gdz_ingest,
     get_pending_for_network,
+    run_gdz_pipeline_async, gdz_summary_path,
 )
 from src.data_scanner import find_csv_for_date, scan_available_days
 
@@ -100,17 +102,10 @@ def render():
             )
             st.dataframe(vdf, use_container_width=True, height=300)
 
-            auto_build = False
-            if net_key == "ADM":
-                auto_build = st.checkbox(
-                    "İngest sonrası feature matrisini kur (Adım 03)",
-                    value=True, key=f"{net_key}_build",
-                )
-            else:
-                st.checkbox(
-                    "Feature build (GDZ — gelecek çalışma)",
-                    value=False, disabled=True, key=f"{net_key}_build_disabled",
-                )
+            auto_build = st.checkbox(
+                "İngest sonrası feature matrisini kur (Adım 03)",
+                value=True, key=f"{net_key}_build",
+            )
 
             if st.button("✅ Onayla ve Ekle", type="primary", key=f"{net_key}_commit"):
                 _do_commit(net_key, region, target_date, auto_build)
@@ -125,7 +120,7 @@ def render():
     st.markdown("**Toplu işlem**")
     if pending_days and st.button(f"📥 Tümünü sırayla işle ({len(pending_days)} gün)",
                                    key=f"{net_key}_batch"):
-        auto_build = net_key == "ADM" and st.checkbox(
+        auto_build = st.checkbox(
             "Feature build ile", value=True, key=f"{net_key}_batch_build",
         )
         success_count = 0
@@ -164,3 +159,24 @@ def _do_commit(net_key: str, region: str, target_date: date, auto_build: bool):
             f"✓ Feature matrisi: {feat_result['n_rows']} satır, "
             f"{feat_result['n_features']} feature"
         )
+    elif net_key == "GDZ" and auto_build:
+        # GDZ'nin pipeline'ı ayrı process olarak çağrılır (bare `run_context`/
+        # `forecast_logger` importları ADM ile isim çakışıyor — bkz. tab_tahmin_uret.py
+        # docstring'i). 01 zaten manuel yapıldı (yukarıda), 02'yi tekrar çekme —
+        # ADM'nin "sadece 03'ü çalıştır" davranışıyla simetrik: --skip-ingest
+        # --skip-weather --dry-run, 01-03'te durur (04+ tetiklemez).
+        with st.spinner("Feature matrisi kuruluyor (GDZ Adım 03, subprocess)..."):
+            proc = run_gdz_pipeline_async(["--skip-ingest", "--skip-weather", "--dry-run"])
+            proc.wait()
+        if proc.returncode != 0:
+            st.error(f"✗ GDZ feature build başarısız (exit code {proc.returncode})")
+        else:
+            try:
+                summary = json.loads(gdz_summary_path().read_text(encoding="utf-8"))
+                feat_result = summary.get("steps", {}).get("03_features", {})
+                st.info(
+                    f"✓ GDZ Feature matrisi: {feat_result.get('n_rows', '?')} satır, "
+                    f"{feat_result.get('n_features', '?')} feature"
+                )
+            except Exception as e:
+                st.warning(f"Summary okunamadı ama işlem tamamlandı: {e}")

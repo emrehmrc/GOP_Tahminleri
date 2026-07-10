@@ -1,203 +1,376 @@
-# STLF Live-Ops Yol Haritası — ADM Canlı Tahmin Ürünü
+# STLF Live-Ops Yol Haritası — ADM + GDZ Canlı Tahmin Ürünü
 
 > **Amaç:** Deneysel/notebook kökenli, canlıya yeni geçmiş STLF sistemini sistematik, izlenebilir,
 > aksiyon alınabilir bir live-ops ürününe dönüştürmek. Ana KPI: günlük MAPE'nin düşürülmesi —
 > ama asıl hedef, *MAPE neden yüksekti* sorusunun her gün 15 dakikada cevaplanabilir olması.
 >
-> Bu doküman üç kaynağı birleştirir: (1) kod tabanı keşfi (2026-07-04), (2) literatür/best-practice
-> taraması, (3) mevcut iki tasarım dokümanı — [stlf_izleme_deney_metodolojisi.md](stlf_izleme_deney_metodolojisi.md)
-> ve [stlf_forecast_log_tasarim.md](stlf_forecast_log_tasarim.md) (Faz 0 şeması, §6 kararları kilitli).
+> **Bu doküman iki kaynağı birleştirir:** (1) orijinal kod tabanı keşfi (2026-07-04), (2) 2026-07-07
+> itibarıyla ilerleme + GDZ entegrasyonu + demo-hazırlık haftasından çıkan güncellemeler. İki canlı
+> EDAŞ artık entegre: **ADM** (`adm live/`) ve **GDZ** (`gdz talep/live/`).
 
 ---
 
-## 1. Mevcut Durum Özeti (Kod Tabanı Envanteri)
+## 0. Bu Revizyonun Neleri Değiştirdiği (2026-07-07)
 
-### 1.1 Pipeline mimarisi
+Orijinal doküman (2026-07-04) yazıldıktan sonra bir haftada yol alındı. Özet delta:
+
+| Orijinal iddia (2026-07-04) | Güncel gerçek (2026-07-07) | Aksiyon |
+|---|---|---|
+| Faz -1, 0, 1 tasarım / sıra kodda | **Faz -1, 0, 1 TAMAMLANDI** (commit `b714150`, `4ff8e40`) | Aşağıda ✅ işaretlendi |
+| Tek EDAŞ (ADM); Faz 5 "GDZ somutlaşınca" | **GDZ entegre edildi** — ama *clone + subprocess* mimarisiyle, roadmap'in parametrik tasarımına DEĞİL | Faz 5 "Divergent" olarak yeniden yazıldı |
+| `logs/` boş, git yok, requirements yok | **Git repo var** (13 commit), `.gitignore`, `requirements.txt` (586 satır pin), `logs/` LocalAppData'da doluyor | Faz -1 "done" |
+| Açık Soru #2 (log storage nerede?) | **Karar verildi:** LocalAppData + günlük zip OneDrive'a | Soru kapatıldı |
+| Backtest yok | 4 backtest scripti var (`backtest_30d/7d/tomorrow`, `asof_regen`) — tracked değil | Faz 2b: backtest'i log altyapısına bağla + 1-7 Temmuz doldur |
+| Faz 3 (İzleme dashboard) ~4-6 gün | **Hâlâ YAPILMADI** — UI 3 operasyon tabında. Veri altyapısı (monitoring.duckdb, scorecard) hazır ama UI okumuyor | **Faz 3 öncelik yükseldi** — canlı akış 8 Temmuz'da başlıyor, gözle izleyecek yer yok |
+| — | **YENİ gereksinim:** her gün 9 Temmuz → 10 Temmuz actuals akışı, sürekli | "Canlı Ops Ritmi" bölümü eklendi |
+
+---
+
+## 1. Mevcut Durum Özeti (Kod Tabanı Envanteri — 2026-07-07)
+
+### 1.1 İki tenant, iki klon
+
+```
+çağatay/
+├── adm live/              ← ADM tenant (EDAS_ID="ADM")
+│   ├── config_live.py     (276 satır)
+│   ├── run_daily.py       (157 satır, 6 adım orkestratör)
+│   ├── pipeline/{01..06}.py
+│   ├── src/{run_context, forecast_logger, scorecard, oof_feedback, holiday_calendar}.py
+│   ├── ui/                (Streamlit, 3 tab — Operasyon only)
+│   ├── data/ models/ output/ logs/  (logs/ OneDrive DIŞI, %LOCALAPPDATA%\adm_live_logs\)
+│   └── backtest_*.py, asof_regen.py, perfect_prog_rerun.py, analyze_models_30d.py
+│
+└── gdz talep/             ← GDZ tenant (araştırma kökü)
+    └── live/              ← GDZ canlı (EDAS_ID="GDZ") — ADM'in klonu
+        ├── config_live_gdz.py   (ADM config'i import + GDZ override)
+        ├── run_daily.py, pipeline/{01..06}.py
+        ├── src/{run_context, forecast_logger, holiday_calendar}.py  (ported)
+        └── data/ models/ output/ logs/  (logs/ %LOCALAPPDATA%\gdz_live_logs\)
+```
+
+**Mimari kararı (gerçekleşen):** Faz 5'in "tek pipeline + `configs/<edas_id>.py` + `--edas` flag"
+tasarımı **uygulanmadı**. Bunun yerine her EDAŞ için tüm `live/` dizini kopyalandı (GDZ_LIVE_PORTING_PLAN.md
+buna "Architecture B — directory clone" der). Neden: ADM'in `ui/` modülleri `from run_context import ...`
+gibi bare import'lar yapıp `sys.modules`'i cache'liyor — aynı process'te GDZ modüllerini yüklemek
+ADM şemalı fonksiyonların GDZ verisine uygulanmasına (sessiz hata) yol açıyor. Çözüm: UI, GDZ
+pipeline'ını **subprocess** olarak çağırıyor (`ui/common.py:54-88`, PIPE-deadlock fix'i `:70-78`).
+
+**Sonuç:** İzleme/triyaj/dashboard katmanı model-agnostik kalsın diye forecast_log şemasında `edas_id`
+var (Faz 0 kararı sağlam), ama *kod* katmanı duplikatlı. 3. EDAŞ gelinceye kadar kabul edilebilir;
+o zaman parametrik refactor gündeme gelir.
+
+### 1.2 Pipeline (her tenant için aynı 6 adım)
 
 `run_daily.py` orkestratörü 6 adımı sırayla çalıştırır (her adım idempotent, ara çıktılar parquet):
 
 ```
 01_ingest_actual   OneDrive DD.MM klasöründen müşteri CSV'si → master.parquet (upsert)
-                   └─ update_oof_history(): dünkü arşiv tahmini ⋈ bugünkü actual → oof_history.parquet
+                   └─ update_oof_history() + update_actuals_log() (D+1 yük dalgası)
 02_fetch_weather   Open-Meteo Forecast API, 14 istasyon (Muğla/Denizli/Aydın) → weather_fc_live.parquet
-                   └─ ilk 24h'i weather_history.parquet'e upsert (actual'lar ~D+6 Archive sync ile düzelir)
+                   └─ weather_history.parquet upsert + update_actuals_log_weather() (~D+6 düzelir)
+                   └─ NaN gap auto-repair (fix_weather_history.py, 2026-07-07 eklendi)
 03_build_features  master + weather_history + weather_fc → Boray DataManager → feature_matrix.parquet
+                   └─ ⚠ global dropna monkeypatch hâlâ var (teknik borç #3, kalmadı)
 04_predict_48h     4 model recursive (T+0→T+1→T+2): XGB + LGBM + CatBoost(ops.) + Chronos-2(LoRA)
-                   └─ Stacking: Rolling Ridge (OOF, 60 gün) → frozen Ridge → basit ortalama (fallback zinciri)
-                   └─ Holiday override: hafta içi tatilde CatBoost solo
+                   └─ Stacking: Rolling Ridge (OOF, 60 gün) → frozen Ridge → basit ortalama (fallback)
+                   └─ Holiday override: hafta içi tatilde CatBoost solo (ADM'de CAT=0'a karantinaya alındı)
 05_postprocess     Holiday substitution (donmuş alpha) + PV bias correction (donmuş lookup, T1/T2 ayrı)
+                   └─ GDZ'de bias correction WORSEN ettiği için pass-through (GDZ_LIVE_PORTING_PLAN.md:226-232)
 06_deliver         T+2 günü → Excel teslim + tüm 48h → output/archive/*.parquet
+                   └─ write_forecast_log(ctx) + rebuild_duckdb_views() + backup_logs_zip()
+                   └─ build_daily_scorecard() + check_alerts()  (non-blocking)
 ```
 
 Modeller her gün **yeniden eğitilir** (son ~22.000 saat, `MAX_TRAIN_SIZE` concept-drift kapağı) ve
-model dosyaları **yerinde üzerine yazılır** (`04:231,237,246`). Post-process artefaktları (PV bias
-lookup, holiday alphas) donmuş; `POST_HOLIDAY_MULTIPLIERS` config'de hardcoded.
+run sonrası `models/archive/<run_id>/`'a kopyalanır (90 gün tut, sonra `prune_archive()` siler).
 
-### 1.2 Mevcut loglama/kayıt
+### 1.3 Mevcut loglama/kayıt (Faz 0 + Faz 1 sonrası)
 
-| Mekanizma | İçerik | Granülerlik | Durum |
+| Mekanizma | İçerik | Granülerlik | Durum (2026-07-07) |
 |---|---|---|---|
-| `logs/<date>_run.log` | Adım süreleri, hata traceback | Run başına | Var — ama `logs/` şu an **boş** (⚠ doğrulanmalı) |
-| `logs/<date>_summary.json` | Adım sonuç dict'leri | Run başına | Aynı |
-| `data/oof_history.parquet` | date, hour, actual, 5 model tahmini | Saatlik | Çalışıyor (01 tetikler) |
-| `logs/mape_history.json` | Model bazlı MAPE | Günlük entry | ⚠ Hesap **kümülatif** — aşağıya bak |
-| `output/archive/*_full48h.parquet` | Tüm 48h, model bazlı tahminler | Saatlik | Çalışıyor (2 run arşivli) |
+| `%LOCALAPPDATA%/<edas>_live_logs/forecast_log/` | saat × run, full şema (deltas, flags, meta ağırlık) | Saatlik | ✅ Çalışıyor — ADM 4 target_date, GDZ 2 target_date dolu |
+| `%LOCALAPPDATA%/<edas>_live_logs/actuals_log/` | y_actual, wx_*_actual, data_quality_flag | Saatlik | ✅ ADM 33 gün (06-05→07-07), GDZ 30 gün |
+| `monitoring.duckdb` (her tenant ayrı) | forecast_log_v / actuals_log_v (dedup QUALIFY view) | — | ✅ Çalışıyor |
+| `logs/backup/*.zip` | günlük log yedeği → OneDrive | Günlük | ✅ 3 zip (07-05/06/07) |
+| `daily_scorecard` (DuckDB'de türetilmiş) | MAPE/WAPE/RMSE/ME + saat-blok + model bazlı + corrector + robust_z | Günlük | ✅ `scorecard.py` çalışıyor ama UI okumuyor |
+| `logs/alerts/<date>.json` | z>3 alarmı | Günlük | ⚠ Scaffold var, henüz alarm fir etmedi (ısınma modunda) |
+| `logs/<date>_summary.json` | run_id, config_hash, adım süreleri | Run başına | ✅ |
+| `data/oof_history.parquet` | date, hour, actual, 5 model tahmini | Saatlik | ✅ Çalışıyor (boyut küçük — sadece dün tahmin ⋈ bugün actual) |
+| `output/archive/*_full48h.parquet` | Tüm 48h, model bazlı tahminler | Saatlik | ✅ ADM 6 arşiv (07-01→07-07), GDZ 1 arşiv |
+| `models/archive/<run_id>/` | model dosyaları + manifest.json + config snapshot + feature_matrix | Run başına | ✅ ADM 5 run, GDZ 2 run arşivli |
+| `verdicts.csv` | insan verdict kodu | Kötü gün başına | ❌ YOK (scorecard `_load_verdicts()` boş DataFrame döndürüyor) |
+| `known_events.csv` | kesinti/arıza/etkinlik | Olay başına | ❌ YOK (config path tanımlı ama dosya yok) |
 
-**Ne YOK:** WAPE/ME/RMSE yok, günlük bazda MAPE trendi yok, meta-model ağırlıkları hiç kaydedilmiyor
-(üretilip atılıyor), düzeltme adımlarının (override/substitution/PV) per-saat katkısı kaydedilmiyor,
-kullanılan hava tahmini snapshot'ı ayrıca loglanmıyor, config/model versiyonu hiçbir çıktıya damgalanmıyor.
+### 1.4 Config ve versiyonlama — tekrarlanabilirlik durumu
 
-### 1.3 Config ve versiyonlama — tekrarlanabilirlik durumu
+- **Kod git'te.** ✅ 13 commit (07-04 → 07-07). `.gitignore` data/output/logs/ ignore ediyor, donmuş
+  kalibrasyon artefaktları (`models/*.json`) `!` pattern'le geri include edildi.
+- **`config_hash`** = `config_live.py` sha256 ilk 8 karakteri (`run_context.py:66-70`). Her run'a damgalıyor.
+- **Model arşivi** `models/archive/<run_id>/` + `manifest.json` (model_versions hash, chronos adapter
+  fingerprint, feature_snapshot_ref). Geçmiş model durumu geri getirilebilir.
+- **HPO parametreleri** JSON'larda. 2026-07-07'de CAT HPO JSON'larının elden bozulduğu fark edildi,
+  `git checkout` ile restore edildi (commit `49f9452`) — git'in değeri kanıtlandı.
+- **`requirements.txt`** 586 satır tam pin. ✅
+- **GDZ config:** `config_live_gdz.py` ADM'i import + GDZ override (hava noktaları/sütunları `gdz talep/config.py`'den).
 
-- **Kod git'te DEĞİL.** Çalışma dizini bir git reposu değil; kod OneDrive senkronuyla "versiyonlanıyor". En büyük tekrarlanabilirlik açığı bu.
-- Config tek Python dosyası (`config_live.py`) — hash'lenmiyor, değişiklik tarihi izlenmiyor. "3 hafta önceki tahmin hangi config ile üretildi?" sorusu bugün cevaplanamaz.
-- Model artefaktları her gün üzerine yazıldığı için geçmiş model durumu geri getirilemez (arşivde sadece *tahminler* var, modeller yok).
-- HPO parametreleri JSON dosyalarında (`best_params_*_sagemaker_hpo.json`) — bu iyi; ama hangi HPO run'ından geldikleri kayıtlı değil.
-- `requirements.txt` / environment pin yok.
+### 1.5 Backtest / analiz script envanteri (çoğu untracked — Faz 2b'de track edilmeli)
 
-### 1.4 Zayıf noktalar / teknik borç envanteri
+| Script | İşlev | Tracked? |
+|---|---|---|
+| `backtest_30d.py` | 30-gün as-of T+2 backtest (idempotent, skip existing) | ✅ commit `ae0443f` |
+| `analyze_models_30d.py` | Per-model 30-gün analiz → `model_analysis_report.csv` | ✅ |
+| `asof_regen.py` | "Geçmişte olsaydık" replay — master'ı issue date'e kes, 03-06 yeniden koştur | ❌ untracked |
+| `backtest_7d.py` | 7-gün as-of backtest (perfect-prog weather) | ❌ untracked |
+| `backtest_tomorrow.py` | Gerçek teslim günü backtest (T+1, 2-gün-ahead; `backtest_7d`'nin T+2 bug'ını düzeltir) | ❌ untracked |
+| `perfect_prog_rerun.py` | Faz 1: model-vs-meteoroloji ayrıştırması (actual weather rerun) | ❌ untracked |
+| `export_hourly_mape_7d.py` | Saatlik MAPE kırılımı (forecast_log_v ⋈ actuals_log_v, read-only) | ❌ untracked |
+| `backfill_logs.py` | forecast_log/actuals_log kısmi backfill (y_pred/actual geriye dönük; delta/meta sadece ileri) | ❌ untracked |
 
-1. **Sessiz fallback'ler attribution'ı bozuyor:** Chronos patlarsa `CHRONOS_Pred` kolonuna **XGB kopyası** yazılıyor ([04_predict_48h.py:400](pipeline/04_predict_48h.py:400)); CatBoost import edilemezse sessizce atlanıyor ([04:248](pipeline/04_predict_48h.py:248)). Logda flag yok → OOF history'de Chronos'un "performansı" aslında XGB olabilir. (Faz 0 şemasındaki `chronos_ok`/`cat_present` tam bunu çözüyor.)
-2. **`log_daily_mape` yanıltıcı:** [oof_feedback.py:213](src/oof_feedback.py:213) MAPE'yi *tüm OOF geçmişi* üzerinden hesaplıyor, günlük değil — trend izlemek için kullanılamaz. 201-206'daki günlük groupby ölü kod.
-3. **Global monkeypatch:** [03_build_features.py:47](pipeline/03_build_features.py:47) `pd.DataFrame.dropna`'yı process-genelinde no-op yapıyor (Boray DataManager'ı değiştirmemek için). Kontrollü ama kırılgan — DataManager'a başka bir dropna eklenirse sessizce farklı davranır.
-4. **mtime hack:** [03:213-221](pipeline/03_build_features.py:213) sahte `_tmp_combined.xlsx` + `os.utime` ile DataManager'ın cache mantığı kandırılıyor.
-5. **Ölü config:** `ENABLE_WEEKEND_SPLIT_*` flag'leri ve `MODEL_*_WD_SAT/_WE` yolları canlı 04'te hiç kullanılmıyor (import edilip bırakılmış) — config ile gerçek davranış ayrışmış.
-6. **Hata yönetimi = maskeleme:** `stack_predictions` ve post-process adımları geniş `except`'lerle fallback'e düşüyor; run "ok" bitiyor ama hangi yolun kullanıldığı sadece stdout print'inde. Pipeline hata ile durursa **alerting yok** (summary.json'a yazılıyor, kimse bakmazsa görülmüyor).
-7. **OneDrive bağımlılığı:** Veri girişi OneDrive klasör senkronuna bağlı (`LIVE_DATA_DIR`); parquet/DuckDB gibi dosyaların OneDrive altında kilitlenme/çakışma riski var (bkz. Açık Soru #2).
-8. **Test yok:** Hiçbir adımın birim/entegrasyon testi yok; `validate()` (01) tek gerçek veri doğrulama noktası.
-9. **UI izleme yapmıyor:** Streamlit paneli 3 sekme (Veri Durumu / Veri Yükleme / Tahmin Üret) — operasyon aracı, izleme/analiz sayfası yok.
+**Eksik:** walk-forward backtest koşullarının forecast_log/actuals_log'a **kaydedilmesi** yok — bu
+scriptler ayrı parquet çıktılar üretiyor (`oof_30day.parquet`, `model_analysis_report.csv`), log
+şemasına yazmıyor. Faz 2b bunu düzeltmeli: backtest koşuları da `forecast_log`'a `run_type='backtest'`
+damgasıyla yazılsın ki dashboard canlı + backtest'i tek yerde görsün.
 
-**Özet hüküm:** Pipeline'ın kendisi düzgün kurgulanmış (idempotent adımlar, ara parquet'ler, OOF feedback
-döngüsü). Eksik olan **gözlemlenebilirlik ve tekrarlanabilirlik katmanı** — tam da Faz 0 tasarımının hedefi.
+### 1.6 Zayıf noktalar / teknik borç envanteri (güncellenmiş)
+
+1. ~~Sessiz fallback'ler attribution'ı bozuyor~~ → **KISMEN ÇÖZÜLDÜ:** `chronos_ok`/`cat_present`
+   flag'leri forecast_log'a yazılıyor (Faz 0). Ama Chronos patlayınca hâlâ `CHRONOS_Pred`'e XGB
+   kopyası yazılıyor — davranış değişmedi, sadece artık görünüyor. Açık Soru #8 hâlâ açık.
+2. ~~`log_daily_mape` yanıltıcı (kümülatif)~~ → **ÇÖZÜLDÜ:** `run_daily.py:124-125` legacy çağrı
+   emekliye ayrıldı, yerini `build_daily_scorecard()` aldı (Faz 1).
+3. **Global monkeypatch** (`03_build_features.py:47` `dropna` no-op) — hâlâ duruyor. 2026-07-07'de
+   `_suppress_dropna` forecast row koruması eklendi (commit `2dcfa4a`) ama kök neden değil.
+4. **mtime hack** (`03:213-221` sahte `_tmp_combined.xlsx` + `os.utime`) — hâlâ duruyor.
+5. **Ölü config:** `ENABLE_WEEKEND_SPLIT_*` flag'leri hâlâ kullanılmıyor. CAT `CALIBRATED_ENSEMBLE_WEIGHTS=0`
+   yapıldı (karantina) ama config'te yolu duruyor.
+6. **Hata yönetimi = maskeleme:** geniş `except`'ler hâlâ var; ama artık `check_alerts()` + summary.json
+   + forecast_log var, sessizlik azaldı. **Alerting kanalı hâlâ yok** (Açık Soru #3 açık).
+7. ~~OneDrive bağımlılığı parquet için riskli~~ → **ÇÖZÜLDÜ:** logs/ OneDrive dışına taşındı. Veri
+   girişi (`LIVE_DATA_DIR`) hâlâ OneDrive'da — bu kabul edilebilir (CSV tek seferlik okuma).
+8. **Test yok** — hâlâ. Demo-hazırlık haftası 6+ bug fix'i test olmadan yakalandı; regressyon riski birikiyor.
+9. ~~UI izleme yapmıyor~~ → **Hâlâ doğru:** UI 3 operasyon tabında, İzleme sayfası YOK (Faz 3 gap).
+10. **YENİ — master bayat hava kolonu bug'ı** (2026-07-07 keşfi, commit `6265b35`): master.parquet'te
+    stale weather `_actual` kolonları fresh weather_history merge'inde kazanıyordu → eğitim verisi
+    8 gün geride kalıyordu. Düzeltildi ama kök neden (master'a weather yazılması) izlenmeli.
+11. **YENİ — clone duplikasyonu:** ADM ve GDZ `live/` dizinleri ~%90 aynı kod. Bug fix bir tarafta
+    yapıldığında diğer tarafa propagate edilmesi manuel. 3. EDAŞ'ta bu sürdürülemez.
+12. **YENİ — GDZ eksikleri:** oof_feedback (rolling ridge) yok, scorecard yok, ensemble kalibrasyonu
+    yok (equal average), Chronos LoRA kullanılmıyor (zero-shot), UI disabled.
+
+**Özet hüküm:** Gözlemlenebilirlik ve tekrarlanabilirlik katmanı (Faz -1/0/1) **oturdu**. Sıradaki
+en kritik gap: **Faz 3 İzleme/Analiz dashboard** — veri hazır, gösteren yok. Canlı akış 8 Temmuz'da
+başlıyorsa insanların bakacağı yer olmalı. İkinci gap: backtest sonuçlarının log altyapısına
+bağlanması (Faz 2b) ki geçmişe dönük analiz tek yerde toplansın.
 
 ---
 
-## 2. Hedef Mimari
+## 2. Hedef Mimari (güncellenmiş)
 
 ### 2.1 Katmanlar
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  UI: Streamlit multipage (Operasyon / İzleme / Deney)          │  ← Faz 3 (karar verildi: Dash'e geçilmiyor)
+│  UI: Streamlit multipage                                       │
+│   ADM: Operasyon / İzleme&Analiz / Deney   ← Faz 3 (KRİTİK)   │
+│   GDZ: Operasyon / İzleme&Analiz (Faz 6)                       │
 ├────────────────────────────────────────────────────────────────┤
-│  Analiz: daily_scorecard, robust-z, CUSUM, PSI, triyaj,        │  ← Faz 1-2-4
-│  perfect-prog rerun, hata madenciliği, shadow karşılaştırma    │
+│  Analiz: daily_scorecard ✅, robust-z ✅, window_report ✅,     │  ← Faz 1 DONE
+│  perfect-prog ✅, triyaj (partial), CUSUM/PSI/shadow (Faz 4)   │
 ├────────────────────────────────────────────────────────────────┤
-│  Log deposu: forecast_log + actuals_log (parquet, partition)   │  ← Faz 0
-│  + known_events.csv + monitoring.duckdb (türetilmiş)           │
+│  Log deposu: forecast_log ✅ + actuals_log ✅ (parquet)         │  ← Faz 0 DONE
+│  + known_events.csv (YOK) + monitoring.duckdb ✅ (her tenant)   │
 ├────────────────────────────────────────────────────────────────┤
-│  Pipeline: run_daily 6 adım (mevcut) + run_id/config_hash      │
-│  + snapshot delta'ları + shadow runner (Faz 4)                 │
+│  Pipeline: run_daily 6 adım ✅ + run_id/config_hash ✅          │  ← Faz -1/0 DONE
+│  + backtest runner (Faz 2b) + shadow runner (Faz 4)             │
 ├────────────────────────────────────────────────────────────────┤
-│  Temel hijyen: git repo, requirements pin, model arşivi        │  ← Faz -1 (yeni)
+│  Tenant: ADM (adm live/) + GDZ (gdz talep/live/) — clone+sub   │  ← Faz 5 DIVERGENT
+│  Temel hijyen: git ✅, requirements pin ✅, model arşivi ✅     │  ← Faz -1 DONE
 └────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Logging şeması (özet — tam şema: [stlf_forecast_log_tasarim.md](stlf_forecast_log_tasarim.md))
+### 2.2 Logging şeması (Faz 0 kilitli, uygulandı)
 
-Kilitlenmiş kararlar (2026-07-04): her düzeltme adımı ayrı delta kolonu; `known_event` başta CSV;
-perfect-prog rerun mümkün (weather_history = gerçekleşme, ~D+6); depo = parquet + DuckDB; günlük partition.
-
-| Tablo | Grain | Ne zaman yazılır | Kritik alanlar |
+| Tablo | Grain | Kritik alanlar | Durum |
 |---|---|---|---|
-| `forecast_log` | saat × run | Tahmin anında (05 sonrası) | 4 model ham tahmini, `chronos_ok`/`cat_present`, meta ağırlıklar + method, `y_pred_ens_raw`, `override_delta`/`subst_delta`/`pv_bias_delta`, `y_pred_final`, `wx_*_fcst`, `day_type`, `config_hash`, `model_versions`, `run_id`, `edas_id` |
-| `actuals_log` | saat | D+1 (yük) + ~D+6 (hava) iki dalga | `y_actual`, `wx_*_actual`, `data_quality_flag`, `known_event` |
-| `daily_scorecard` | gün | Her sabah türetilir (DuckDB) | MAPE/WAPE/RMSE/ME, saat-blok MAPE'leri, model bazlı MAPE, corrector katkısı bps, `temp_fcst_error`/`ghi_fcst_error`, `robust_z`, `verdict_code` |
-| `known_events.csv` | olay | Manuel | edas_id, ts_start, ts_end, kategori, not |
+| `forecast_log` | saat × run | 4 model ham tahmini, `chronos_ok`/`cat_present`, meta ağırlıklar + method, `y_pred_ens_raw`, `override_delta`/`subst_delta`/`pv_bias_delta`, `y_pred_final`, `wx_*_fcst`, `day_type`, `config_hash`, `model_versions`, `run_id`, `edas_id` | ✅ Yazılıyor |
+| `actuals_log` | saat | `y_actual`, `wx_*_actual`, `data_quality_flag`, `known_event` | ✅ y_actual D+1, wx ~D+6 |
+| `daily_scorecard` | gün | MAPE/WAPE/RMSE/ME, saat-blok MAPE'leri, model bazlı MAPE, corrector katkısı bps, `temp_fcst_error`/`ghi_fcst_error`, `robust_z`, `verdict_code` | ✅ Türetiliyor (verdict_code null) |
+| `known_events.csv` | olay | edas_id, ts_start, ts_end, kategori, not | ❌ Boş |
 
-Depolama: `logs/forecast_log/edas_id=ADM/target_date=YYYY-MM-DD/run_<issue_date>.parquet` + tek
-`monitoring.duckdb`. Hacim: tek EDAŞ × saatlik = günde 48 satır → yıllarca tek makinede sorun yok.
-**Varsayım:** Multi-tenant 5+ EDAŞ olsa bile hacim DuckDB sınırlarının çok altında kalır; ağır MLOps
-platformu (Kubeflow vb.) bu ölçekte gereksiz — literatürde de küçük-orta hacim için "parquet + DuckDB +
-cron + dashboard" deseni yeterli görülüyor (bkz. Evidently model monitoring rehberi, Kaynakça #1).
+Depolama: `%LOCALAPPDATA%/<edas>_live_logs/forecast_log/edas_id=X/target_date=YYYY-MM-DD/run_<issue>.parquet`
++ `monitoring.duckdb` (her tenant ayrı) + günlük zip → `logs/backup/`. Hacim DuckDB sınırlarının
+çok altında. **Varsayım (doğrulandı):** tek makinede yıllarca sorun yok.
 
 ### 2.3 Deney/versiyon katmanı
 
-- **Git repo** (Faz -1): kod + config versiyonu. `config_hash` = config_live.py içerik hash'i; promotion günü hash değişimi changepoint analizinde otomatik işaret olur.
-- **Model artefakt arşivi:** her run'da `models/` → `models/archive/<run_id>/` kopyası (birkaç MB/gün; 90 gün tut, sonra sil). MLflow Model Registry bu ölçekte opsiyonel — dosya-tabanlı arşiv + `model_versions` kolonu aynı işi görür (Açık Soru #4).
-- **MLflow'un yeri:** offline deneyler (backtest koşuları) için uygun; **production günlük skorları MLflow'a değil `daily_scorecard`'a** yazılır (metodoloji dokümanı §1 kararıyla uyumlu; MLflow tracking dokümantasyonu da production monitoring'i ayrı tutmayı önerir, Kaynakça #12).
+- **Git repo** ✅ — `config_hash` her run'a damgalıyor, promotion günü hash değişimi changepoint
+  analizi için otomatik işaret.
+- **Model artefakt arşivi** ✅ — `models/archive/<run_id>/` + manifest.json + feature snapshot.
+  MLflow Model Registry bu ölçekte hâlâ opsiyonel (Açık Soru #4 kapatıldı).
+- **MLflow'un yeri:** offline deneyler için uygun; production günlük skorları `daily_scorecard`'a.
 
 ---
 
-## 3. Faz Faz Yol Haritası
+## 3. Faz Faz Yol Haritası (güncellenmiş)
 
-Fazlar mevcut plandaki 0-4 sırasını korur; başına "hijyen" fazı (-1), sonuna çoklu-EDAŞ fazı (5) eklendi.
-Eforlar kaba tahmindir (tek kişi, kesin taahhüt değil).
+### Faz -1 — Temel Hijyen — ✅ TAMAMLANDI (2026-07-04, commit `b714150`)
+- git repo, .gitignore, requirements.txt, `run_context.py` (run_id/config_hash/archive/prune), `logs/` OneDrive dışında.
 
-### Faz -1 — Temel Hijyen (YENİ) — ~1-2 gün
-- **Ne:** `git init` + ilk commit + `.gitignore` (data/, models/, output/, logs/); `requirements.txt` pin; model dosyalarının run sonrası `models/archive/<run_id>/`'a kopyalanması; `logs/` boşluğunun nedeninin bulunması (run.log neden yok?).
-- **Neden:** Tekrarlanabilirliğin sıfır noktası. `config_hash` ancak git ile anlamlı olur; forecast_log'a yazılacak `model_versions` ancak arşiv varsa işe yarar. Bugün bir "kötü gün"ün config'ini geri getirmek imkânsız.
-- **Bağımlılık:** Yok. Bugün başlanabilir, Faz 0 ile paralel yürür.
+### Faz 0 — Günlük Log Altyapısı — ✅ TAMAMLANDI (2026-07-05, commit `4ff8e40`)
+- `src/forecast_logger.py` (480 satır, full pyarrow şema + DuckDB views + zip backup).
+- `04`'te snapshot/flag'ler, `05`'te delta kolonları, `01`'de actuals_log, `02`'de weather actuals_log.
+- LocalAppData'ya yazıldı (Açık Soru #2 kapatıldı: opsiyon (b) seçildi).
 
-### Faz 0 — Günlük Log Altyapısı (tasarım kilitli, sıra kodda) — ~3-5 gün
-- **Ne:** `src/forecast_logger.py` (pyarrow şema + `write_forecast_log()` / `update_actuals_log()`); `04`'te override-öncesi ensemble snapshot'ı, `stack_predictions`'ın meta ağırlık/method döndürmesi, `chronos_ok`/`cat_present` flag'leri; `05`'te adım-arası snapshot'lardan delta kolonları; `run_daily`'de `run_id`/`config_hash` üretimi; `01`'de `data_quality_flag`; `output/archive`'dan kısmi backfill.
-- **Neden:** "Neden" sorusunun hammaddesi. Tahmin anında yakalanmayan (meta ağırlık, delta, kullanılan hava) geri dönülemez kaybolur. Sessiz fallback'ler (teknik borç #1) ancak flag'lenirse görünür olur.
-- **Bağımlılık:** Tasarım onayı ✅ (2026-07-04). Faz -1'den `run_id` disiplinini alır.
+### Faz 1 — daily_scorecard + 7/30/365 — ✅ TAMAMLANDI (2026-07-05, commit `4ff8e40`)
+- `src/scorecard.py` (295 satır): MAPE/WAPE/ME/RMSE + saat-blok + model bazlı + corrector katkısı
+  + robust-z (median/MAD 30g, tatil ayrı baseline, ısınma modu) + `window_report(7/30/365)` + `check_alerts()`.
+- `perfect_prog_rerun.py` manual tetiklenen v1 ✅.
 
-### Faz 1 — daily_scorecard + Çoklu Pencere (7/30/365) Analizi — ~4-6 gün
-- **Ne:** forecast_log ⋈ actuals_log join'inden günlük scorecard (DuckDB); MAPE/WAPE/ME/RMSE + saat-blok + model bazlı attribution; robust z-score alarmı (`z = (MAPE−median_30d)/(1.4826·MAD_30d)`, z>3 tetik; tatiller ayrı baseline); 7/30/365 pencere raporu (7g: operasyonel sağlık, 30g: sistematik bias/mevsim geçişi, 365g: yapısal drift); perfect-prog rerun scripti (gerçekleşen hava ile tahmini yeniden üret → hata ayrıştırması model-vs-meteoroloji).
-- **Neden:** Günlük MAPE gürültülü — tek günden karar çıkmaz; median/MAD tabanlı eşik tatil kirliliğine dayanıklı. Yük literatüründe kötü günlerin büyük payı hava tahmin hatasından gelir; perfect-prog rerun olmadan model haksız yere suçlanır (GEFCom geleneği, Kaynakça #8). WAPE eklenmeli çünkü düşük yük saatlerinde MAPE şişer (Kaynakça #6).
-- **Bağımlılık:** Faz 0 (en az ~2 hafta forecast_log birikimi; backfill ile hızlanır). `log_daily_mape` kümülatif hesabı (borç #2) bu fazda emekliye ayrılır.
+### Faz 2 — "Kötü Gün" Triyaj Protokolü — ⚠️ PARTIAL
+- **Var:** `check_alerts()` + `logs/alerts/` scaffold + scorecard'da `verdict_code` kolonu (null) +
+  `_load_verdicts()` / `_load_known_events()` (boş döner, graceful).
+- **Yok:** `verdicts.csv` (insan verdict girişi), `known_events.csv` (saha olayları), otomatik
+  triyaj raporu üreticisi, 2-3 geçmiş kötü gün provası.
+- **Öner:** 8 Temmuz canlı akış başlayınca ilk kötü günde triyaj protokolünü provo — `known_events.csv`
+  iskeletini doldur (sahha ekibiyle temas, Açık Soru #6). Otomatik raporu sonra yaz.
 
-### Faz 2 — "Kötü Gün" Triyaj Protokolü — ~2-3 gün kod + süreç oturtma
-- **Ne:** Metodoloji §3'teki 6 adımlı protokolün (veri kalitesi → dış şok → hava hatası → saat profili → bileşen attribution → verdict) yarı-otomasyonu: z>3 gününde otomatik "triyaj raporu" üret (ilgili tüm log alanları tek sayfada), insan verdict kodunu seçer, `daily_scorecard.verdict_code`'a yazılır. `known_events.csv` süreci başlar. 2-3 geçmiş kötü gün üzerinde prova.
-- **Neden:** Verdict dağılımı hem aylık kalite raporunun hem deney backlog'unun hammaddesi. `UNEXPLAINED` oranı >%20 ise log şeması eksik demektir — şemanın kendini test etme mekanizması.
-- **Bağımlılık:** Faz 1 (scorecard + rerun).
+### Faz 2b — Backtest Log Entegrasyonu + 1-7 Temmuz Doldurma — YENİ, ~1-2 gün
+- **Ne:** (a) backtest scriptlerini (`backtest_30d/7d/tomorrow`, `asof_regen`) `forecast_log`'a
+  `run_type='backtest'` damgasıyla yazacak şekilde güncelle — böylece dashboard canlı + backtest'i
+  tek tabloda ayırt edip gösterebilir. (b) **1-7 Temmuz için walk-forward backtest koştur**
+  (her gün için sadece o güne kadar olan veriyle — gerçekçi), forecast_log + actuals_log'u doldur.
+  (c) Scriptleri git'e track et (çoğu untracked).
+- **Neden:** Kullanıcı 8 Temmuz'da canlı başlıyor ama "1 Temmuz'dan başlamışız gibi backtest yapıp
+  boş durmasın" diyor. Walk-forward = gerçek canlı akışı simüle eder, MAPE dürüst. Backtest
+  sonuçları log'a yazılırsa Faz 3 dashboard ilk açılışta 7 günlük geçmişle karşılaşır (sıfırdan değil).
+- **Bağımlılık:** Faz 0 (log şeması) ✅. `asof_regen` zaten as-of replay yapıyor — `write_forecast_log`
+  çağrısı eklenebilir. Compute: her gün ~dakikalar (GBDT-only), Chronos dahilse ~saat. **Varsayım:**
+  7 gün walk-forward tek makinede bir akşamda biter.
+- **Not:** `backtest_tomorrow.py`'nin T+2 vs T+1 bug'ı (yanlış gün ölçümü) düzeltildi — backtest
+  metric'leri **teslim edilen günü** (T+1) ölçmeli, T+2'yi değil. Faz 2b'de bu doğrulansın.
 
-### Faz 3 — Dashboard MVP (Streamlit'te kalınıyor) — ~4-6 gün
-- **Ne:** Mevcut panele multipage yapı: **Operasyon** (bugünkü run durumu, veri sağlığı — mevcut sekmeler), **İzleme** (scorecard trendi, 7/30/365 pencereler, saat-blok ısı haritası, model bazlı MAPE, corrector katkısı, meta ağırlık trendi — Plotly), **Deney** (shadow karşılaştırma, verdict dağılımı, backlog). Veri kaynağı: doğrudan `monitoring.duckdb`.
-- **Neden:** Günlük 5-10 dk'lık insan bakışının aracı. Karar verildi: iç araç + az kullanıcı için Streamlit yeterli; Dash'in avantajı (WSGI ölçekleme, fine-grained callback) bu kullanım profilinde gerekmiyor (Kaynakça #15-16). Yeniden değerlendirme tetiği: eşzamanlı kullanıcı >10 veya sayfa-arası state sorunları çıkarsa.
-- **Bağımlılık:** Faz 1 (gösterilecek veri). Faz 2 ile paralel yürüyebilir.
+### Faz 3 — İzleme & Analiz Dashboard (KRİTİK, öncelik yükseldi) — ❌ YAPILMADI, ~5-7 gün
+- **Ne:** Mevcut Streamlit paneline multipage yapı. **3 sayfa:**
+  1. **Operasyon** (mevcut 3 tab'ın taşıdığı — Veri Durumu / Veri Yükleme / Tahmin Üret) — GDZ
+     subprocess entegrasyonu stabil hale gelsin.
+  2. **İzleme & Analiz** (YENİ, Faz 3'ün çekirdeği) — `monitoring.duckdb`'den okur:
+     - **Gün seçici** + **model seçici** (kullanıcının ana talebi: "günü istediğim model sonuçlarını
+       detaylıca geçmiş günlerle analiz")
+     - Tahmin vs actual üst-üste çizgi grafik (Plotly), saatlik MAPE bar, residual plot
+     - Scorecard trendi (günlük MAPE/WAPE/RMSE/ME, 7/30/365 pencere)
+     - Saat-blok ısı haritası (gece/sabah/PV/akşam × gün)
+     - Model bazlı MAPE karşılaştırma (XGB/LGBM/CAT/Chronos/Ensemble)
+     - Corrector katkısı (override/subst/PV delta bps) + meta ağırlık trendi
+     - Robust-z alarm banner'ı + `verdict_code` (boş olsa da yer hazır)
+     - Perfect-prog rerun karşılaştırması (model vs meteoroloji hata payı)
+     - **Tenant seçici** (ADM / GDZ) — veri altyapısı `edas_id` ile hazır, UI'da dropdown
+     - **Backtest vs canlı ayıracı** (`run_type` kolonu — Faz 2b'ye bağımlı)
+  3. **Deney** (sonra, Faz 4'le) — shadow karşılaştırma, verdict dağılımı, backlog. Faz 3'te iskelet.
+- **Neden:** 8 Temmuz'da canlı akış başlıyor — her gün 9 Temmuz tahmini → 10 Temmuz actuals. İnsanların
+  bakacağı yer yoksa loglar karanlıkta kalır. Bu, kullanıcının "kendi geçmiş verileri/tahmin ile
+  karşılaştıran grafik, günü istediğim model sonuçlarını detaylıca geçmiş günlerle analiz" talebinin
+  tam karşılığı. Veri altyapısı hazır (Faz 0/1), tek gap UI.
+- **Bağımlılık:** Faz 1 ✅ (gösterilecek veri var). Faz 2b ile paralel/ardıl yürüyebilir (backtest
+  doldurmadan da açılır, ama 2b önce yapılırsa ilk açılışta 7 gün geçmiş olur). Faz 2 bağımsız.
+- **Karar (korumalı):** Streamlit + Plotly, multipage. Yeniden değerlendirme tetiği: >10 eşzamanlı
+  kullanıcı veya real-time refresh. (Açık Soru #1 kapatıldı.)
 
-### Faz 4 — CUSUM + Drift + Hata Madenciliği + Champion-Challenger — ~1.5-2 hafta
-- **Ne:**
-  - **CUSUM** günlük ME üzerinde (k=0.5σ, h=4-5σ; σ = son 90 gün, tatil hariç) — sinsi bias kayması alarmı; literatürde forecast-error-üzerinde-CUSUM'un raw-data'dan daha iyi çalıştığı gösterildi (Kaynakça #10).
-  - **PSI/KS input drift** raporu aylık (sıcaklık, GHI, yük dağılımı; PSI>0.2 eşiği) + concept drift ayrımı (aynı sıcaklık bin'lerinde residual yıl-yıl karşılaştırması — input aynı + hata farklı = ilişki değişmiş, re-fit yetmez) (Kaynakça #1-3). **Varsayım:** Evidently kütüphanesi hazır PSI/KS verir ama bağımlılık eklemek yerine ~100 satır custom hesap da yeterli olabilir — Faz 4 başında karar.
-  - **Hata madenciliği:** residual'ları gün tipi × saat bloğu × sıcaklık rejimi × GHI rejimi hücrelerinde grupla; |ME| anlamlı + kapsam anlamlı hücreler deney adayı; öncelik skoru = (etki × kapsam × güven) / maliyet.
-  - **Champion-challenger çerçevesi:** 3 kapı — (1) backtest: sabit fold seti + Diebold-Mariano testi (Harvey küçük-örneklem düzeltmeli) + en-kötü-10-gün guardrail; (2) shadow: challenger her gün aynı inputlarla koşar, `forecast_log`'a `shadow_pred_<id>` kolonu, min 28 gün (4 hafta döngüsü; tatil kritikse kapsayana kadar uzat); (3) kontrollü geçiş: probation 14 gün, z eşiği 2.5, **ters shadow** (eski config shadow'da koşmaya devam — rollback kriteri önceden yazılır). Tek tahminli üründe trafik bölünemediği için gerçek A/B yok; bu disiplin onun ikamesi (Kaynakça #11, #13-14).
-- **Neden:** (a) günlük alarm tek kötü günü yakalar, CUSUM sürekli kaymayı; (b) yeni model/feature'ı canlıya güvenle sokmanın tek yolu shadow — "backtest'te iyiydi" tek başına promotion gerekçesi olamaz (M5 dersleri: protokol sabitlenmezse herkes kendi fold'unu seçer, Kaynakça #9).
-- **Bağımlılık:** Faz 0-1 (loglar + scorecard). Shadow runner, pipeline'ın 04-05 adımlarını challenger config ile ikinci kez koşturur — **Varsayım:** günlük ek ~1 saat işlem süresi kabul edilebilir (Chronos CPU'da yavaş; challenger GBDT-only ise çok daha hızlı).
+### Faz 4 — CUSUM + Drift + Hata Madenciliği + Champion-Challenger — ❌ YAPILMADI, ~1.5-2 hafta
+- **CUSUM** günlük ME üzerinde (k=0.5σ, h=4-5σ; σ = son 90 gün, tatil hariç) — sinsi bias kayması alarmı.
+- **PSI/KS input drift** aylık (sıcaklık, GHI, yük; PSI>0.2) + concept drift ayrımı (aynı sıcaklık
+  bin'lerinde residual yıl-yıl — input aynı + hata farklı = ilişki değişmiş).
+- **Hata madenciliği:** residual'ları gün tipi × saat bloğu × sıcaklık/GHI rejimi hücrelerinde grupla.
+- **Champion-challenger:** 3 kapı — (1) backtest: sabit fold + Diebold-Mariano (Harvey düzeltmeli)
+  + en-kötü-10-gün guardrail; (2) shadow: challenger her gün aynı inputla koşar, `forecast_log`'a
+  `shadow_pred_<id>` kolonu, min 28 gün; (3) kontrollü geçiş: probation 14g, z eşiği 2.5, ters shadow.
+- **Bağımlılık:** Faz 0-1 ✅. Shadow runner 04-05'i challenger config ile 2. kez koşturur — **Varsayım:**
+  günlük ek ~1 saat CPU kabul (Chronos yavaş; challenger GBDT-only ise çok daha hızlı).
 
-### Faz 5 — Çoklu EDAŞ Genişleme Mimarisi — ~2-3 hafta (GDZ somutlaşınca)
-- **Ne:** (a) `edas_id` zaten tüm şemalarda (Faz 0 kararı) — veri tarafı hazır; (b) pipeline'ı tenant-parametrik hale getir: `config_live.py` → `configs/<edas_id>.py` (veya YAML) + ortak `config_base`; (c) model katmanına adapter arayüzü: her EDAŞ'ın model seti bir "strategy" (ADM = 4-model stacking; GDZ = kendi metodolojisi) ama hepsi aynı `forecast_log` şemasına yazar — izleme/triyaj/dashboard katmanı hiç değişmez; (d) `run_daily.py --edas GDZ`; (e) scorecard ve dashboard'da tenant seçici.
-- **Neden:** Genişleme maliyetini "yeni EDAŞ = yeni monitoring sistemi"nden "yeni EDAŞ = yeni config + model adapter"a indirmek. İzleme katmanının model-agnostik olması bunun ön şartı — Faz 0 şeması bunu şimdiden garanti ediyor.
-- **Bağımlılık:** Faz 0-3'ün oturması. **Varsayım:** GDZ verisi/metodolojisi ADM ile aynı saatlik grain'de olacak; değilse şemaya `resolution` alanı eklenir (küçük değişiklik).
+### Faz 5 — Çoklu EDAŞ Genişleme — ⚠️ DIVERGENT (clone ile yapıldı, parametrik değil)
+- **Gerçekleşen:** ADM + GDZ iki ayrı `live/` klonu, UI GDZ'yi subprocess ile çağırıyor. forecast_log
+  şeması `edas_id` taşıyor (izleme katmanı agnostik) ama *kod* duplikatlı.
+- **Neden divergent:** UI modüllerinin bare import'ları `sys.modules` cache'ini kirletiyor — aynı
+  process'te iki tenant'ın modüllerini yüklemek sessiz hata riski. Clone+subprocess bu riski sıfırlar.
+- **Maliyet:** bug fix'ler manuel propagate. 3. EDAŞ'ta sürdürülemez.
+- **Yeniden değerlendirme tetiği (Açık Soru #9, YENİ):** 3. EDAŞ somutlaşınca clone→parametrik
+  refactor gündeme gelir. O zamana kadar: (a) her clone kendi `run_context`/`forecast_logger`'ını
+  taşır (zaten öyle), (b) Faz 3 dashboard tek process'te iki tenant'ın `monitoring.duckdb`'sini
+  dropdown ile açabilir (dosya yolundan, import kirletmez) — bu, izleme tarafında parametrik vizyonu
+  *şimdiden* korur. (c) ortak kod (`scorecard.py`, `forecast_logger.py` şema) bir `shared/` pakete
+  taşınıp her klon import edebilir — refactor maliyeti düşürür.
 
-### Sürekli (faz değil): Operasyonel ritim
-Metodoloji §7'deki günlük (5-10 dk) / haftalık (30-45 dk) / aylık (2-3 saat) / çeyreklik checklist'ler,
-Faz 1 tamamlanınca yürürlüğe girer. Alerting kanalı için Açık Soru #3.
+### Faz 6 — GDZ Tamamlama — ⚠️ PARTIAL (~1 hafta)
+GDZ_LIVE_PORTING_PLAN.md'nin 6 adımından 6.1/6.2 done, gerisi bekliyor:
+- ✅ 6.1 `run_context` (archive/prune/manifest)
+- ✅ 6.2 `forecast_logger` (parquet + DuckDB + zip)
+- ❌ 6.3 `oof_feedback` (rolling ridge) — GDZ'de yok; stacking frozen Ridge kullanıyor
+- ❌ 6.4 `scorecard` + `check_alerts` — GDZ'nin `live/src/`inde `scorecard.py` yok
+- ❌ 6.5 ensemble kalibrasyonu — GDZ equal average (`t2_df.mean(axis=1)`), `CALIBRATED_ENSEMBLE_WEIGHTS` placeholder
+- ❌ 6.6 Chronos LoRA — GDZ zero-shot, kendi LoRA'sı kullanılmıyor (biliberateli kararla)
+- ❌ UI for GDZ — disabled, "🚧 Yakında"
+- **Öner:** 6.4'ü Faz 3 dashboard'a bindir (GDZ monitoring.duckdb'sini dropdown'da göster, scorecard
+  türetme ADM'in `scorecard.py`'si tenant-parametreli hale getirilip her iki duckdb'ye koşabilir).
+  6.3/6.5/6.6 GDZ'nin akademik araştırma köküne bağlı — ayrı backlog.
+
+### Sürekli (faz değil): Canlı Ops Ritmi — 8 Temmuz 2026'dan itibaren başlar
+Kullanıcının tanımladığı akış:
+- **Her gün (8 Temmuz'dan):** `run_daily.py` koş → T+1 (örn. 9 Temmuz) tahminini üret → Excel teslim.
+- **Ertesi gün (örn. 10 Temmuz):** dünün actuals'ı OneDrive'a düşer → 01_ingest actuals_log'u günceller
+  → scorecard 9 Temmuz için türetilir → Faz 3 dashboard'da 9 Temmuz actual vs tahmin görünür.
+- **Günlük 5-10 dk bakış (Faz 3 tamamlanınca):** dashboard'da dünkü MAPE, robust-z, model katkısı.
+- **Haftalık 30-45 dk:** 7-gün pencere, saat-blok ısı, model trendi.
+- **Aylık 2-3 saat:** 30-gün pencere, verdict dağılımı, deney backlog güncelleme.
+- **Alerting kanalı hâlâ açık (Açık Soru #3)** — 8 Temmuz'a kadar minimal: pipeline hatası → e-posta?
 
 ---
 
-## 4. İlk 2 Haftada Yapılacaklar (sıralı, somut)
+## 4. Sonraki Adımlar (8 Temmuz canlı start'ına odaklı, sıralı)
 
-**Hafta 1 — hijyen + log altyapısı:**
-1. **Gün 1:** `git init` + ilk commit + `.gitignore`; `pip freeze > requirements.txt`; `logs/` klasörünün neden boş olduğunu araştır (run.log yazılıyor mu, OneDrive mi taşıdı?) — izleme sisteminin kendisi loglara dayanacak, bu belirsizlik kapanmalı.
-2. **Gün 1-2:** `config_live.py`'ye `EDAS_ID`, `FORECAST_LOG_DIR`, `ACTUALS_LOG_DIR`, `MONITORING_DB` sabitleri; `run_daily.py`'de `run_id` (`<issue_date>_<config_hash8>`) üretimi; run sonrası model dosyalarını `models/archive/<run_id>/`'a kopyala.
-3. **Gün 2-4:** `src/forecast_logger.py` — pyarrow şeması (tasarım dokümanı §2-3 birebir) + `write_forecast_log()` + `update_actuals_log()`. `04`'e snapshot/flag eklemeleri (`y_pred_ens_raw`, meta ağırlıklar, `chronos_ok`, `cat_present`), `05`'e delta kolonları.
-4. **Gün 4-5:** `run_daily.py` entegrasyonu → bir sonraki canlı run'da forecast_log dolmaya başlar. `output/archive/*` + `oof_history.parquet`'ten kısmi backfill (y_pred'ler ve actual'lar geriye dönük; meta ağırlık/delta'lar sadece ileriye dönük).
+**8 Temmuz'a kadar (1 gün):**
+1. **Faz 2b — backtest doldurma:** 1-7 Temmuz için walk-forward backtest koştur, forecast_log +
+   actuals_log'a `run_type='backtest'` damgasıyla yaz. Böylece Faz 3 dashboard ilk açılışta 7 gün
+   geçmişle karşılaşır. Scriptleri track et.
+2. **Faz 3 — İzleme sayfası MVP:** gün/model seçici + tahmin-vs-actual grafik + scorecard trend +
+   tenant dropdown. Geri kalanını (ısı haritası, perfect-prog, deney) sonra ekle.
+3. **Canlı akış provası:** 8 Temmuz'da `run_daily.py` manuel koştur → 9 Temmuz teslimi → 10 Temmuz
+   actuals geri beslemesi → dashboard'da görünür mü doğrula.
 
-**Hafta 2 — scorecard + ilk sinyaller:**
-5. **Gün 6-8:** `build_daily_scorecard()` (DuckDB): MAPE/WAPE/ME/RMSE, saat-blok, model bazlı MAPE, corrector katkısı. Backfill'lenen geçmişle ilk scorecard'ı üret.
-6. **Gün 8-9:** Robust z-score hesabı + `known_events.csv` iskeleti. (30 günlük median/MAD penceresi dolana kadar z-score "ısınma modunda" — mutlak eşik, örn. son 60 gün p95, geçici tetik olur. **Varsayım:** backfill ~30+ gün sağlarsa ısınma kısalır.)
-7. **Gün 9-10:** Perfect-prog rerun scripti (v1: manuel tetiklenen — hedef gün ver, weather_history'deki actual havayla 03-04-05'i yeniden koştur, iki MAPE'yi karşılaştır).
-8. **Gün 10:** Geçmişteki en kötü 1-2 gün üzerinde triyaj provası — şemada eksik alan var mı testi. Bulgulara göre şema küçük revizyon.
+**8-14 Temmuz (canlı ilk hafta):**
+4. Her gün run + teslim + ertesi gün actuals. Dashboard'da günlük bakış.
+5. İlk kötü günde (z>3 fir ederse) Faz 2 triyaj provası — `known_events.csv`'i doldurmaya başla.
+6. Faz 3 dashboard'ı geri kalan widget'larla tamamla (ısı haritası, model MAPE, corrector, perfect-prog).
 
-Bu iki haftanın sonunda: her run izlenebilir (`run_id`+`config_hash`), her tahminin bileşen dökümü kalıcı,
-günlük scorecard otomatik, kötü gün alarmı ve hava-ayrıştırması çalışır durumda.
+**15-31 Temmuz:**
+7. Faz 2 triyaj otomasyonu (rapor üreticisi) + verdicts.csv süreci otur.
+8. Faz 4 CUSUM (önceki 14 günlük ME dizisi ısınmaya başlar) + PSI aylık rapor iskeleti.
+9. GDZ Faz 6.4 (scorecard tenant-parametrik) + 6.3/6.5 backlog'a.
+
+Bu planın sonunda (Temmuz sonu): canlı akış oturmuş, her gün dashboard'da analiz, kötü gün triyajı
+çalışır, CUSUM ısınıyor, iki tenant'ın da izlemesi tek dashboard'da.
 
 ---
 
-## 5. Açık Sorular / Kararlar (proje sahibinin masasında)
+## 5. Açık Sorular / Kararlar (güncellenmiş)
 
-1. ~~Streamlit mi Dash mi?~~ **Karar verildi:** Streamlit + Plotly, multipage. Yeniden değerlendirme tetiği: >10 eşzamanlı kullanıcı veya real-time refresh ihtiyacı.
-2. **Log storage nerede?** Mevcut her şey OneDrive-senkronlu dizinde. Parquet append + DuckDB için OneDrive kilitlenme/çakışma riski gerçek. Seçenekler: (a) olduğu gibi bırak (basit, riskli), (b) `logs/` ve `monitoring.duckdb`'yi OneDrive dışı lokal dizine taşı + günlük zip yedeği OneDrive'a (önerim), (c) baştan küçük bir sunucu/NAS. Karar Faz 0 kodundan **önce** gerekli.
-3. **Alerting kanalı:** Pipeline hatası ve z>3 alarmı nereye düşsün? E-posta / Teams webhook / sadece dashboard? (Şu an: hiçbiri.)
-4. **Model artefakt arşivi vs MLflow Registry:** Önerim dosya-tabanlı arşiv (basit, yeterli); MLflow sadece offline backtest deneylerinde. Ekip büyürse Registry'ye geçiş kolay.
-5. **Shadow compute bütçesi:** Challenger'ın günlük tam koşusu (Chronos dahil) ~1 saat ek CPU. Kabul mü, yoksa challenger'lar GBDT-only mi başlasın?
-6. **`known_events` sahibi kim?** Kesinti/arıza/etkinlik bilgisini kim, hangi kaynaktan girecek? (Saha ekibiyle temas gerektirir — teknik değil organizasyonel karar.)
-7. **Probabilistic forecasting ufku:** Müşteri tek nokta tahmini istiyor; ama pinball loss ile kuantil takibi (Hong & Fan) risk iletişimi için değerli. Faz 4 sonrası "araştırma" maddesi olarak backlog'a alınsın mı?
-8. **Chronos fallback politikası:** Chronos patlayınca XGB kopyası yazmak yerine ensemble'ı 3 modelle koşturmak daha dürüst. Faz 0'da `chronos_ok` flag'i görünürlük getirir; davranış değişikliği (kopya yerine drop) ayrıca kararlaştırılmalı.
+1. ~~Streamlit mi Dash mi?~~ **Kapandı:** Streamlit + Plotly, multipage. Tetik: >10 eşzamanlı kullanıcı.
+2. ~~Log storage nerede?~~ **Kapandı:** LocalAppData + günlük zip OneDrive'a (opsiyon (b)).
+3. **Alerting kanalı (HÂLÂ AÇIK, acil):** 8 Temmuz canlı start'ında pipeline hatası nereye düşsün?
+   E-posta / Teams webhook / sadece dashboard? Minimum: `run_daily.py` hataında e-posta.
+4. ~~Model artefakt arşivi vs MLflow?~~ **Kapandı:** dosya-tabanlı arşiv (yeterli).
+5. **Shadow compute bütçesi (açık):** Challenger günlük tam koşu (Chronos dahil) ~1 saat. Kabul mü,
+   GBDT-only mi başlasın? Faz 4 başında karar.
+6. **`known_events` sahibi (açık, organizasyonel):** Kesinti/arıza bilgisini kim girecek? Sahha ekibi
+   teması gerek. 8 Temmuz'da ilk kötü günde provo.
+7. **Probabilistic forecasting (backlog):** Faz 4 sonrası araştırma maddesi.
+8. **Chronos fallback politikası (HÂLÂ AÇIK):** `chronos_ok` flag'i var ama davranış değişmedi
+   (Chronos patlayınca XGB kopyası). Drop yerine kopya mı? 8 Temmuz canlıda riskli — öncesinde karar.
+9. **Clone→parametrik refactor zamanı (YENİ):** 3. EDAŞ somutlaşınca. O zamana kadar `shared/`
+   paket (scorecard/forecast_logger şema) extracts maliyeti düşürür. Şimdilik acil değil.
+10. **Backtest metric doğru gün (YENİ, doğrulanmalı):** `backtest_tomorrow.py` T+1 (teslim günü)
+    ölçüyor, `backtest_7d` T+2 (bug'lı). Faz 2b'de tüm backtest'ler teslim gününü ölçmeli.
+11. **GDZ LoRA (YENİ):** GDZ kendi Chronos LoRA'sını biliberateli kullanmıyor (zero-shot). Doğrulama
+    backlog'ta — performans yetersizse LoRA eğitimi gündeme gelir.
 
 ---
 
@@ -219,7 +392,7 @@ günlük scorecard otomatik, kötü gün alarmı ve hava-ayrıştırması çalı
 
 **Champion-challenger / shadow:**
 11. [Wallaroo — A/B Testing and Shadow Deployments](https://wallaroo.ai/ai-production-experiments-the-art-of-a-b-testing-and-shadow-deployments/), [DagsHub — Model Deployment Strategies](https://dagshub.com/blog/model-deployment-types-strategies-and-best-practices/), [Dataiku — Monitoring and Feedback Concept](https://knowledge.dataiku.com/latest/mlops-o16n/model-monitoring/concept-monitoring-feedback.html), [Snowflake — Champion-Challenger Deployment Guide](https://www.snowflake.com/en/developers/guides/ml-champion-challenger-model-deployment/) — shadow = challenger aynı inputla koşar, çıktısı loglanır, karar empirik.
-   - DM testi: Diebold & Mariano (1995) + Harvey et al. (1997) düzeltmesi; [Wiley — Evaluating Forecasts at Multiple Horizons (DM uzantısı)](https://onlinelibrary.wiley.com/doi/full/10.1002/for.70150).
+    - DM testi: Diebold & Mariano (1995) + Harvey et al. (1997) düzeltmesi; [Wiley — Evaluating Forecasts at Multiple Horizons (DM uzantısı)](https://onlinelibrary.wiley.com/doi/full/10.1002/for.70150).
 
 **Experiment tracking / logging şeması:**
 12. [MLflow Tracking](https://mlflow.org/docs/latest/ml/tracking/), [Model Registry](https://mlflow.org/docs/latest/ml/model-registry/), [Dataset tracking](https://mlflow.org/docs/latest/ml/dataset/) — ne loglanmalı: params/metrics/artifacts/tags + data lineage (hash, versiyon); registry'nin run-lineage bağı.
@@ -241,4 +414,5 @@ günlük scorecard otomatik, kötü gün alarmı ve hava-ayrıştırması çalı
 
 ---
 
-*Doküman: 2026-07-04. Kod tabanı keşfi bu tarihli canlı dizin üzerinden; iki canlı run arşivi mevcuttu (2026-07-01, 2026-07-03).*
+*Doküman: ilk 2026-07-04, güncellendi 2026-07-07. Kod tabanı keşfi 2026-07-07 tarihli canlı dizin
++ `gdz talep/live/` üzerinden; 13 commit, 5 ADM arşivli run, 2 GDZ arşivli run, 33 günlük actuals_log.*
