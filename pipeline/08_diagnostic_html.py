@@ -12,8 +12,16 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 import config_live as C
 
+_EDAS = "ADM"
+_temp_station = "MUGLA_MenteseCenter_app_temp_actual"
+_ghi_col = "GHI_ADM_Weighted"
+_fc_prefixes = ["", "ADM_"]
+
 # En guncel forecast dosyasini bul (tarih bugun olmayabilir)
-_fc_files = sorted(set(C.OUTPUT_DIR.glob("*_forecast.xlsx")) | set(C.OUTPUT_DIR.glob("*_ADM_forecast.xlsx")))
+_fc_files = []
+for _p in _fc_prefixes:
+    _fc_files += list(C.OUTPUT_DIR.glob(f"*_{_p}forecast.xlsx"))
+_fc_files = sorted(set(_fc_files))
 _fc_files = sorted([f for f in _fc_files if '_REGEN' not in f.name])
 _fc_date = None
 for _p in reversed(_fc_files):
@@ -54,14 +62,15 @@ print(f"Merged: {len(merged)} rows")
 fc, fc7, fc14 = None, None, None
 for offset, name in [(0, "fc"), (7, "fc7"), (14, "fc14")]:
     ds = str(TODAY - timedelta(days=offset))
-    for prefix in ["", "ADM_"]:
+    for prefix in _fc_prefixes:
         p = C.OUTPUT_DIR / f"{ds}_{prefix}forecast.xlsx"
         if p.exists():
             try:
                 d = pd.read_excel(p, sheet_name="Tahmin")
                 locals()[name] = d.set_index("Saat")["Tahmin_MWh"]
                 break
-            except: pass
+            except Exception as _e:
+                print(f"     UYARI: {p.name} okunamadi ({_e})")
 
 # ─── COMPARISON DAYS ─────────────────────────────────────────────────
 comp_dates = []
