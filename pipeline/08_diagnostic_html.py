@@ -3,7 +3,7 @@
 =========================================================================
 Sekmeler: Ozet, D+2 Karsilastirma, P95 Analysis, Cross Check, Sensitivity, Oneriler
 """
-import sys, json, os
+import sys, json, os, re
 import pandas as pd, numpy as np
 from pathlib import Path
 from datetime import date, timedelta
@@ -12,8 +12,19 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 import config_live as C
 
-OUT = C.OUTPUT_DIR / f"diagnostic_{date.today().strftime('%Y-%m-%d')}.html"
-TODAY = date.today()
+# En guncel forecast dosyasini bul (tarih bugun olmayabilir)
+_fc_files = sorted(set(C.OUTPUT_DIR.glob("*_forecast.xlsx")) | set(C.OUTPUT_DIR.glob("*_ADM_forecast.xlsx")))
+_fc_files = sorted([f for f in _fc_files if '_REGEN' not in f.name])
+_fc_date = None
+for _p in reversed(_fc_files):
+    _m = re.search(r'(\d{4}-\d{2}-\d{2})', _p.name)
+    if _m: _fc_date = _m.group(1); break
+FC_DATE = _fc_date or str(date.today())
+OUT = C.OUTPUT_DIR / f"diagnostic_{FC_DATE}.html"
+TODAY = date.fromisoformat(FC_DATE)
+
+if not _fc_date:
+    print("UYARI: Hic forecast dosyasi bulunamadi, bugunun tarihi kullaniliyor.")
 
 # ─── LOAD ────────────────────────────────────────────────────────────
 print("Loading ADM data...")
