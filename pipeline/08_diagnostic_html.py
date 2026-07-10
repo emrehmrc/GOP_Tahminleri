@@ -43,12 +43,14 @@ print(f"Merged: {len(merged)} rows")
 fc, fc7, fc14 = None, None, None
 for offset, name in [(0, "fc"), (7, "fc7"), (14, "fc14")]:
     ds = str(TODAY - timedelta(days=offset))
-    p = C.OUTPUT_DIR / f"{ds}_forecast.xlsx"
-    if p.exists():
-        try:
-            d = pd.read_excel(p, sheet_name="Tahmin")
-            locals()[name] = d.set_index("Saat")["Tahmin_MWh"]
-        except: pass
+    for prefix in ["", "ADM_"]:
+        p = C.OUTPUT_DIR / f"{ds}_{prefix}forecast.xlsx"
+        if p.exists():
+            try:
+                d = pd.read_excel(p, sheet_name="Tahmin")
+                locals()[name] = d.set_index("Saat")["Tahmin_MWh"]
+                break
+            except: pass
 
 # ─── COMPARISON DAYS ─────────────────────────────────────────────────
 comp_dates = []
@@ -230,7 +232,7 @@ TABS.ozet=()=>{
  return h;};
 TABS.ozet_init=()=>{
  if(L7&&L7.length)ch('c7',{type:'bar',data:{labels:L7.map(x=>x[0]),datasets:[{label:'MAPE%',data:L7.map(x=>x[1]),backgroundColor:'rgba(90,209,160,.7)'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{color:'#8b97b3'},grid:{color:'#1c2334'}},x:{ticks:{color:'#8b97b3'},grid:{color:'#1c2334'}}}}});
- if(WX&&WX.temp&&WX.ghi)ch('c_wx',{type:'line',data:{labels:hrs,datasets:[{label:'Sicaklik (C)',data:WX.temp,borderColor:'#ff9f5a',borderWidth:2,pointRadius:2,yAxisID:'y',type:'line'},{label:'GHI (W/m2)',data:WX.ghi,borderColor:'#ffce6a',borderWidth:1.5,pointRadius:1,yAxisID:'y2',type:'line'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#8b97b3',boxWidth:10,font:{size:10}}}},scales:{x:{ticks:{color:'#8b97b3'},grid:{color:'#1c2334'}},y:{position:'left',title:{display:true,text:'C',color:'#8b97b3'},ticks:{color:'#8b97b3'},grid:{color:'#1c2334'}},y2:{position:'right',title:{display:true,text:'W/m2',color:'#8b97b3'},ticks:{color:'#8b97b3'},grid:{drawOnChartArea:false}}}}}});};
+  if(WX&&WX.temp&&WX.ghi)ch('c_wx',{type:'line',data:{labels:hrs,datasets:[{label:'Sicaklik (C)',data:WX.temp,borderColor:'#ff9f5a',borderWidth:2,pointRadius:2,yAxisID:'y',type:'line'},{label:'GHI (W/m2)',data:WX.ghi,borderColor:'#ffce6a',borderWidth:1.5,pointRadius:1,yAxisID:'y2',type:'line'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#8b97b3',boxWidth:10,font:{size:10}}}},scales:{x:{ticks:{color:'#8b97b3'},grid:{color:'#1c2334'}},y:{position:'left',title:{display:true,text:'C',color:'#8b97b3'},ticks:{color:'#8b97b3'},grid:{color:'#1c2334'}},y2:{position:'right',title:{display:true,text:'W/m2',color:'#8b97b3'},ticks:{color:'#8b97b3'},grid:{drawOnChartArea:false}}}}});};
 go._inits.ozet=TABS.ozet_init;
 
 TABS.karsilastirma=()=>{
