@@ -160,7 +160,7 @@ def append_to_master(new_df: pd.DataFrame) -> pd.DataFrame:
     MASTER_PARQUET.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = MASTER_PARQUET.with_suffix(".parquet.tmp")
     combined.to_parquet(tmp_path, index=False)
-    tmp_path.rename(MASTER_PARQUET)
+    tmp_path.replace(MASTER_PARQUET)  # os.replace -> Windows'ta varsa uzerine yazar
     return combined
 
 
