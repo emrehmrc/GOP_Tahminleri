@@ -1,144 +1,260 @@
 """
-07_report_excel.py — Otomatik 5-Tablolu Excel Raporu
-====================================================
-Her forecast sonrasi calisir, ADM + GDZ ayri sheet.
-Tablo 1: D+2 Gerceklesen (saatlik, saga sutun eklenir)
-Tablo 2: D+2 Tahmin vs Gerceklesen + Sapma%
-Tablo 3: D+2 Gunluk MAPE/ME/MAE
+07_report_excel.py — Rapor + Diagnostic
+========================================
+Tek script, 3 cikti:
+  1. forecast.xlsx (musteri teslim)
+  2. STLF_LIVE_RAPOR.xlsx (5 tablo, auto-append)
+  3. diagnostic.html (interaktif)
 """
-import sys, os
-import pandas as pd
-import numpy as np
+import sys, os, json
+import pandas as pd, numpy as np
 from pathlib import Path
 from datetime import date, timedelta
-import shutil
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Border, Side
 
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 import config_live as C
 
-REPORT_FILE = C.OUTPUT_DIR / "STLF_LIVE_RAPOR.xlsx"
-HOURS = list(range(24))
-HLAB = [f"{h:02d}:00" for h in HOURS]
+H = list(range(24))
+HL = [f"{h:02d}:00" for h in H]
+TODAY = date.today()
+REPORT = C.OUTPUT_DIR / "STLF_LIVE_RAPOR.xlsx"
+GREEN = PatternFill("solid", fgColor="C6EFCE")
+YELLOW = PatternFill("solid", fgColor="FFEB9C")
+RED = PatternFill("solid", fgColor="FFC7CE")
+HDR = PatternFill("solid", fgColor="4472C4")
+HDR_F = Font(color="FFFFFF", bold=True)
+BOLD = Font(bold=True)
+THIN = Border(left=Side('thin'),right=Side('thin'),top=Side('thin'),bottom=Side('thin'))
 
-# Row pozisyonlari (0-indexed)
-R1, R2, R3 = 0, 26, 52
-
-def get_act(master, target_col, d):
-    day = master[master[C.RAW_DATE_COL].dt.date == d]
+def ga(m, tc, d):
+    day = m[m[C.RAW_DATE_COL].dt.date == d]
     if len(day) != 24: return None
-    return day.set_index(C.RAW_HOUR_COL)[target_col].sort_index()
+    return day.set_index(C.RAW_HOUR_COL)[tc].sort_index()
 
-def load_fc(path):
-    if not path.exists(): return None
+def lf(p):
+    if not p.exists(): return None
     try:
-        fc = pd.read_excel(path, sheet_name="Tahmin")
-        return fc.set_index("Saat")["Tahmin_MWh"]
+        d = pd.read_excel(p, sheet_name="Tahmin")
+        return d.set_index("Saat")["Tahmin_MWh"]
     except: return None
 
 def mape(p, a):
-    m = (a > 0) & (~np.isnan(p)) & (~np.isnan(a))
-    return float(np.mean(np.abs((a[m]-p[m])/a[m])*100)) if m.sum() else np.nan
-def me(p, a):
-    m = (~np.isnan(p)) & (~np.isnan(a))
-    return float(np.mean(p[m]-a[m])) if m.sum() else np.nan
+    m = (a>0)&(~np.isnan(p))&(~np.isnan(a))
+    return float(np.mean(np.abs((a[m]-p[m])/a[m])*100)) if m.sum() else None
 
-def build_tables(master, target_col, fc_dir, sheet_name, writer):
-    today = date.today()
-    # Son 14 gun D+2 teslim (14 gun once bugun, yani Gecmis)
-    d2 = [today - timedelta(days=i) for i in range(14, 0, -1)]
+def me(p, a):
+    m = (~np.isnan(p))&(~np.isnan(a))
+    return float(np.mean(p[m]-a[m])) if m.sum() else None
+
+def make_report(master, tc, fc_dir, sheet_name):
+    """Return 5 DataFrames for the 5 tables"""
+    now = TODAY; d2 = [now - timedelta(days=i) for i in range(14, 0, -1)]
+    ft2 = now + timedelta(days=2); ft1 = now + timedelta(days=1)
+    realized = sorted(set(d for d in d2 if ga(master, tc, d) is not None))
+    dates = sorted(set(realized + [ft1, ft2]))
+    fc0 = lf(fc_dir / f"{TODAY}_forecast.xlsx")
+    ds = [str(d) for d in dates]
     
-    # ── TABLO 1: D+2 Gerceklesen ──────────────────────────────────
-    t1_data = {"Saat": HLAB}
-    for d in d2:
-        s = get_act(master, target_col, d)
-        if s is not None:
-            t1_data[str(d)] = [f"{s.get(h, np.nan):.0f}" for h in HOURS]
+    def vcol(cols, rows):
+        """rows: list of (hour, [values per date]), cols: [date strings]"""
+        out = [["Saat"] + cols + ["ORT"]]
+        vals_all = {c: [] for c in cols}
+        for h, vals in rows:
+            row = [HL[h]]
+            nv = []
+            for c, v in zip(cols, vals):
+                row.append(v if v else "")
+                if v: nv.append(v)
+            for c, v in zip(cols, vals):
+                if v: vals_all[c].append(v)
+            row.append(f"{np.nanmean([x for x in vals if x]):.0f}" if any(x for x in vals if x) else "")
+            out.append(row)
+        # avg row
+        avg = ["ORTALAMA"]
+        for c in cols:
+            v = vals_all.get(c, [])
+            avg.append(f"{np.nanmean(v):.0f}" if v else "")
+        # total avg
+        all_v = [x for lst in vals_all.values() for x in lst]
+        avg.append(f"{np.nanmean(all_v):.0f}" if all_v else "")
+        out.append(avg)
+        return out
     
-    # Ortalama satiri
-    avg_row = {"Saat": "ORTALAMA"}
-    for k in t1_data:
-        if k == "Saat": continue
-        nums = []
-        for x in t1_data[k]:
-            try: nums.append(float(x))
-            except: pass
-        avg_row[k] = f"{np.mean(nums):.0f}" if nums else ""
-    # Ortalama satirini df'e ekle (sona)
-    t1_df = pd.DataFrame(t1_data)
-    avg_df = pd.DataFrame([avg_row])
-    t1_out = pd.concat([t1_df, avg_df], ignore_index=True)
-    t1_out.to_excel(writer, sheet_name=sheet_name, startrow=R1, index=False)
+    # T1: Realized
+    t1_rows = []
+    for h in H:
+        vals = []
+        for d in dates:
+            if d > now: vals.append(None); continue
+            s = ga(master, tc, d)
+            vals.append(s[h] if s is not None and h in s.index and not np.isnan(s[h]) else None)
+        t1_rows.append((h, vals))
+    t1 = vcol(ds, t1_rows)
     
-    # ── TABLO 2: D+2 Tahmin vs Gerceklesen + Sapma ──────────────
-    # Header satiri
-    cols = ["Saat"]
-    for d in d2:
-        ds = str(d)
-        cols += [f"{ds}_Tahmin", f"{ds}_Gercek", f"{ds}_Sapma%"]
-    t2_data = {c: [] for c in cols}
+    # T2: D+1 Forecast
+    t2_rows = []
+    for h in H:
+        vals = []
+        for d in dates:
+            fc = lf(fc_dir / f"{d}_forecast.xlsx")
+            if fc0 is not None and d == ft1: v = fc0.get(h, None)
+            elif fc is not None: v = fc.get(h, None)
+            else: v = None
+            vals.append(v)
+        t2_rows.append((h, vals))
+    t2 = vcol(ds, t2_rows)
     
-    for h in HOURS:
-        t2_data["Saat"].append(HLAB[h])
-        for d in d2:
-            ds = str(d)
-            act = get_act(master, target_col, d)
-            fc = load_fc(fc_dir / f"{d}_forecast.xlsx")
-            if fc is not None and act is not None:
-                fv, av = fc.get(h, np.nan), act.get(h, np.nan)
-                t2_data[f"{ds}_Tahmin"].append(f"{fv:.0f}" if not np.isnan(fv) else "")
-                t2_data[f"{ds}_Gercek"].append(f"{av:.0f}" if not np.isnan(av) else "")
-                ap = np.abs(av-fv)/av*100 if av > 0 else np.nan
-                t2_data[f"{ds}_Sapma%"].append(f"{ap:.1f}" if not np.isnan(ap) else "")
-            else:
-                t2_data[f"{ds}_Tahmin"].append("")
-                t2_data[f"{ds}_Gercek"].append("")
-                t2_data[f"{ds}_Sapma%"].append("")
+    # T3: D+1 Deviation %
+    t3_rows = []
+    for h in H:
+        vals = []
+        for d in dates:
+            if d > now: vals.append(None); continue
+            s = ga(master, tc, d)
+            fc = lf(fc_dir / f"{d}_forecast.xlsx")
+            if fc is not None and s is not None and h in fc.index and h in s.index and s[h] > 0:
+                vals.append(round(abs(s[h]-fc[h])/s[h]*100, 1))
+            else: vals.append(None)
+        t3_rows.append((h, vals))
+    t3 = vcol(ds, t3_rows)
+    # MAPE/ME rows for T3
+    mp_row = ["MAPE%"]; me_row = ["ME_MWh"]
+    for d in dates:
+        if d > now: mp_row.append(""); me_row.append(""); continue
+        s = ga(master, tc, d); fc = lf(fc_dir / f"{d}_forecast.xlsx")
+        if fc is not None and s is not None:
+            fv = np.array([fc.get(h,np.nan) for h in H]); av = np.array([s.get(h,np.nan) for h in H])
+            mp_row.append(f"{mape(fv,av):.2f}" if mape(fv,av) is not None else "")
+            me_row.append(f"{me(fv,av):.1f}" if me(fv,av) is not None else "")
+        else: mp_row.append(""); me_row.append("")
+    mp_row.append(""); me_row.append("")
+    t3.append(mp_row); t3.append(me_row)
     
-    pd.DataFrame(t2_data).to_excel(writer, sheet_name=sheet_name,
-                                    startrow=R2, index=False)
+    # T4: D+2 Forecast
+    t4_rows = []
+    for h in H:
+        vals = []
+        for d in dates:
+            fc = lf(fc_dir / f"{d}_forecast_REGEN.xlsx")
+            if fc is None: fc = lf(fc_dir / f"{d}_forecast.xlsx")
+            if fc is not None: v = fc.get(h, None)
+            elif fc0 is not None and d == ft2: v = fc0.get(h, None)
+            else: v = None
+            vals.append(v)
+        t4_rows.append((h, vals))
+    t4 = vcol(ds, t4_rows)
     
-    # ── TABLO 3: D+2 Gunluk MAPE/ME ──────────────────────────────
-    t3_data = {"Metrik": ["MAPE%", "ME_MWh"]}
-    for d in d2:
-        ds = str(d)
-        act = get_act(master, target_col, d)
-        fc = load_fc(fc_dir / f"{d}_forecast.xlsx")
-        if fc is not None and act is not None:
-            fv = np.array([fc.get(h, np.nan) for h in HOURS])
-            av = np.array([act.get(h, np.nan) for h in HOURS])
-            t3_data[ds] = [f"{mape(fv, av):.2f}", f"{me(fv, av):.1f}"]
+    # T5: D+2 Deviation %
+    t5_rows = []
+    for h in H:
+        vals = []
+        for d in dates:
+            if d > now: vals.append(None); continue
+            s = ga(master, tc, d)
+            fc = lf(fc_dir / f"{d}_forecast_REGEN.xlsx")
+            if fc is None: fc = lf(fc_dir / f"{d}_forecast.xlsx")
+            if fc is not None and s is not None and h in fc.index and h in s.index and s[h] > 0:
+                vals.append(round(abs(s[h]-fc[h])/s[h]*100, 1))
+            else: vals.append(None)
+        t5_rows.append((h, vals))
+    t5 = vcol(ds, t5_rows)
+    # MAPE/ME
+    mp_row2 = ["MAPE%"]; me_row2 = ["ME_MWh"]
+    for d in dates:
+        if d > now: mp_row2.append(""); me_row2.append(""); continue
+        s = ga(master, tc, d)
+        fc = lf(fc_dir / f"{d}_forecast_REGEN.xlsx")
+        if fc is None: fc = lf(fc_dir / f"{d}_forecast.xlsx")
+        if fc is not None and s is not None:
+            fv = np.array([fc.get(h,np.nan) for h in H]); av = np.array([s.get(h,np.nan) for h in H])
+            mp_row2.append(f"{mape(fv,av):.2f}" if mape(fv,av) is not None else "")
+            me_row2.append(f"{me(fv,av):.1f}" if me(fv,av) is not None else "")
+        else: mp_row2.append(""); me_row2.append("")
+    mp_row2.append(""); me_row2.append("")
+    t5.append(mp_row2); t5.append(me_row2)
     
-    pd.DataFrame(t3_data).to_excel(writer, sheet_name=sheet_name,
-                                    startrow=R3, index=False)
+    return {"T1": t1, "T2": t2, "T3": t3, "T4": t4, "T5": t5}
+
+def write_excel(tables, sheet_name):
+    """Write 5 tables to Excel, auto-append columns"""
+    import openpyxl
+    # Try to load existing
+    wb = None
+    if REPORT.exists():
+        try: wb = openpyxl.load_workbook(REPORT)
+        except: pass
+    if wb is None: wb = openpyxl.Workbook()
+    
+    # Get or create sheet
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        ws = wb.create_sheet(sheet_name)
+    
+    # Row starts
+    r0 = {"T1": 0, "T2": 26, "T3": 52, "T4": 78, "T5": 104}
+    
+    for tid, rows in tables.items():
+        start_row = r0[tid]
+        # Clear old content
+        for r in range(start_row, start_row + len(rows) + 5):
+            for c in range(1, 30):
+                ws.cell(row=r+1, column=c).value = None
+        
+        for ri, row in enumerate(rows):
+            for ci, val in enumerate(row):
+                cell = ws.cell(row=start_row + ri + 1, column=ci + 1)
+                cell.value = val
+                cell.border = THIN
+                if ri == 0:
+                    cell.fill = HDR; cell.font = HDR_F
+                elif val and isinstance(val, str) and val.endswith("%"):
+                    try:
+                        pct = float(val.rstrip("%"))
+                        cell.fill = GREEN if pct < 3 else YELLOW if pct < 6 else RED
+                        cell.number_format = '0.0"%"'
+                    except: pass
+    
+    wb.save(REPORT)
+    print(f"     Rapor: {REPORT.name}")
 
 
 def run():
-    print("\n[07] STLF LIVE RAPOR...")
+    print("\n[07] RAPOR + DIAGNOSTIC...")
     master = pd.read_parquet(C.MASTER_PARQUET)
     master[C.RAW_DATE_COL] = pd.to_datetime(master[C.RAW_DATE_COL])
     
-    with pd.ExcelWriter(REPORT_FILE, engine="openpyxl") as writer:
-        build_tables(master, C.RAW_TARGET_COL, C.OUTPUT_DIR, "ADM", writer)
-        
-        # GDZ
-        try:
-            gdz_path = ROOT.parent.parent / "çağatay" / "gdz talep" / "live"
-            sys.path.insert(0, str(gdz_path))
-            import config_live_gdz
-            gz = pd.read_parquet(config_live_gdz.GDZ_MASTER_PARQUET)
-            gz[C.RAW_HOUR_COL] = gz["Tarih"].dt.hour  # extract hour
-            gz["Tarih"] = gz["Tarih"].dt.normalize()
-            gz_col = [c for c in gz.columns if "Enerji" in c or "MWh" in c][0]
-            gz = gz.rename(columns={"Tarih": C.RAW_DATE_COL, gz_col: "Enerji"})
-            build_tables(gz, "Enerji", config_live_gdz.OUTPUT_DIR, "GDZ", writer)
-            print("     [GDZ] eklendi")
-        except Exception as e:
-            print(f"     [GDZ] atlandi: {e}")
+    tables = make_report(master, C.RAW_TARGET_COL, C.OUTPUT_DIR, "ADM")
+    write_excel(tables, "ADM")
     
-    print(f"     Rapor: {REPORT_FILE.name}")
-    return {"status": "ok", "file": str(REPORT_FILE)}
+    # GDZ
+    try:
+        gdz_path = ROOT.parent.parent / "çağatay" / "gdz talep" / "live"
+        sys.path.insert(0, str(gdz_path))
+        import config_live_gdz
+        gz = pd.read_parquet(config_live_gdz.GDZ_MASTER_PARQUET)
+        gz["Tarih"] = pd.to_datetime(gz["Tarih"])
+        gz[C.RAW_HOUR_COL] = gz["Tarih"].dt.hour
+        gz = gz.rename(columns={"Tarih": C.RAW_DATE_COL, 
+                                config_live_gdz.GDZ_RAW_TARGET_COL: "Enerji"})
+        gz_tables = make_report(gz, "Enerji", config_live_gdz.OUTPUT_DIR, "GDZ")
+        write_excel(gz_tables, "GDZ")
+        print("     [GDZ] eklendi")
+    except Exception as e:
+        print(f"     [GDZ] atlandi: {e}")
+    
+    # Diagnostic HTML
+    print("\n     [08] DIAGNOSTIC HTML...")
+    diag_script = ROOT / "pipeline" / "08_diagnostic_html.py"
+    if diag_script.exists():
+        ret = os.system(f'"{sys.executable}" "{diag_script}"')
+        if ret == 0: print("     [08] OK")
+        else: print(f"     [08] HATA: donus kodu {ret}")
+    
+    return {"status": "ok", "file": str(REPORT)}
 
 if __name__ == "__main__":
     print(run())
