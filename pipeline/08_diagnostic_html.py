@@ -165,6 +165,20 @@ if len(today_wx) == 24:
     if temp_c in tdx.columns: fc_wx_dict["temp"] = tdx[temp_c].values.tolist()
     if ghi_c in tdx.columns: fc_wx_dict["ghi"] = tdx[ghi_c].values.tolist()
     if cloud_c and cloud_c in tdx.columns: fc_wx_dict["cloud"] = tdx[cloud_c].values.tolist()
+else:
+    # Fallback: weather_fc_live.parquet'ten forecast hava durumunu al
+    wfc = pd.read_parquet(C.DATA_DIR / "weather_cache" / "weather_fc_live.parquet")
+    wfc[C.RAW_DATE_COL] = pd.to_datetime(wfc["Tarih"]).dt.normalize()
+    today_wfc = wfc[wfc[C.RAW_DATE_COL].dt.date == TODAY].set_index(C.RAW_HOUR_COL).sort_index() if C.RAW_HOUR_COL in wfc.columns else pd.DataFrame()
+    if len(today_wfc) > 12:
+        fc_temp_col = temp_c.replace("_actual", "_fc") if temp_c else None
+        fc_ghi_col = ghi_c.replace("_actual", "_fc") if ghi_c else None
+        if fc_temp_col and fc_temp_col in today_wfc.columns:
+            fc_wx_dict["temp"] = today_wfc[fc_temp_col].values.tolist()
+        if fc_ghi_col and fc_ghi_col in today_wfc.columns:
+            fc_wx_dict["ghi"] = today_wfc[fc_ghi_col].values.tolist()
+        if fc_wx_dict:
+            print(f"     Forecast weather yuklendi: {len(today_wfc)} saat, temp={fc_temp_col}, ghi={fc_ghi_col}")
 
 # ─── BUILD HTML (Embed ded tiny Chart.js) ────────────────────────────
 def js(v):
