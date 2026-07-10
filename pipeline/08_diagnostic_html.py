@@ -328,7 +328,7 @@ T.sens=()=>{{
  h+='<div class="panel"><h3>Sezonsal + Gun Tipi Sensitivity (MW/C)</h3><div class="chartbox"><canvas id="cs2"></canvas></div></div>';
  h+='<div class="panel"><h3>Interaktif Senaryo Motoru</h3><p class="note">Sicaklik sapmasina gore beklenen yuk degisimi</p>';
  h+='<div style="margin:10px 0"><label style="color:#8b97b3;font-size:12px">Sicaklik Sapmasi: <span id="sval" class="slider-val">0C</span></label><br>';
- h+='<input type="range" id="srange" min="-5" max="5" value="0" step="1" oninput="document.getElementById(\'sval\').textContent=(this.value>0?\'+\':\'\')+this.value+\'C\';updateScenario(+this.value);" style="margin:8px 0"></div>';
+ h+='<input type="range" id="srange" min="-5" max="5" value="0" step="1" oninput="var e=document.getElementById(\\'sval\\');if(e)e.textContent=(this.value>0?\\'+\\':\\'\\')+this.value+\\'C\\';updateScenario(+this.value);" style="margin:8px 0"></div>';
  h+='<div id="scenOut" style="color:#c7d0e3;font-size:12px"></div></div>';
  return h;}};
 g._i.sens=()=>{{
