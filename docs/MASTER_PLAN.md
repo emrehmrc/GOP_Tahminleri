@@ -274,6 +274,18 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    **`update_oof_history` finalize_run'a taşınmadı** (bilerek — halihazırda `pipeline/01_ingest_actual.py`
    step 01'de doğru yerde çağrılıyor); bunun yerine sonucu artık `run()` dönüşünde görünür
    (`result["oof"]`) — eskiden sadece stdout'a print edilip bare `except`le yutuluyordu.
+1b. ✅ **Pilot doğrulama (2026-07-13, `experiments/oof_backfill_pilot.py`):** tam ~30 günlük backfill
+   (asof_regen.regen_one() ~4dk/gün) kullanıcı kararıyla AYRI bir oturuma ertelendi — bunun yerine
+   mekanizmanın kendisi 5 günlük (07-08..07-12, zaten `ARCHIVE_DIR`'da gerçek veri olduğu için regen
+   GEREKMEDİ) dry-run pilot ile doğrulandı: `src/oof_feedback.py`'de `update_oof_history`'nin gün-başına
+   kayıt çıkarma mantığı `_records_for_day()` olarak ortak bir fonksiyona çıkarıldı (refactor, davranış
+   değişmedi), backfill script bunu tekrar kullandı. `get_segment_weights(min_samples_per_segment=30)`
+   5 günle beklendiği gibi `None` döndü (hiçbir segment eşiği geçmiyor — crash yok, güvenli fallback).
+   Eşik gevşetilince (`min_samples_per_segment=10`) 4 hafta-içi segment için makul ağırlıklar üretti
+   (hafta sonu segmentleri hâlâ veri azlığından hariç) — **mekanizma uçtan uca çalışıyor, sadece veri
+   hacmi eksik.** `pytest tests/` 67/67 yeşil (refactor sonrası). Pilot verisi `data/_oof_pilot.parquet`
+   (git-ignored, canlı `oof_history.parquet`'e HİÇ yazılmadı). **Tam ~30 günlük backfill + walkforward
+   A/B + canlıya bağlama hâlâ ayrı bir oturumun konusu.**
 2. 🔶 **Segment-bazlı adaptif ağırlık — SCAFFOLDING, CANLIYA BAĞLANMADI:**
    `src/oof_feedback.py:get_segment_weights()` — `hour_block × day_type_group` (aynı 2a-2 grupları)
    kesişiminde rolling-lookback inverse-MAPE ağırlığı hesaplar, `(hour_block, day_type_group) ->

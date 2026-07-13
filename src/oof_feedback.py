@@ -61,6 +61,38 @@ def _find_archive_for_date(archive_dir: Path, target_date: str) -> Optional[Path
     return None
 
 
+def _records_for_day(
+    day_forecast: pd.DataFrame,
+    day_actuals: pd.DataFrame,
+    target_date,
+    raw_target_col: str,
+    raw_hour_col: str,
+) -> list[dict]:
+    """`update_oof_history` ve backfill (Faz 2 2c-2 pilot, 2026-07-13) ORTAK çekirdeği --
+    tek bir günün tahmin+actual eşleştirmesinden OOF kayıt listesi üretir. `day_forecast`
+    'Datetime' ve model tahmin kolonlarını içermeli (canlı arşiv `*_full48h.parquet` ya
+    da asof_regen `*_models_REGEN.parquet` — ikisi de aynı şemayı paylaşır)."""
+    day_forecast = day_forecast.copy()
+    day_forecast["hour"] = day_forecast["Datetime"].dt.hour
+    day_actuals_dict = {int(r[raw_hour_col]): r[raw_target_col] for _, r in day_actuals.iterrows()}
+
+    chronos_fallback = _is_chronos_fallback(day_forecast)
+
+    records = []
+    for _, row in day_forecast.iterrows():
+        h = int(row["hour"])
+        actual = day_actuals_dict.get(h)
+        if actual is None or np.isnan(actual):
+            continue
+        rec = {"date": str(target_date), "hour": h, "actual": float(actual),
+               "chronos_fallback": chronos_fallback}
+        for col in ["XGB_Pred", "LGBM_Pred", "CAT_Pred", "CHRONOS_Pred", "Ensemble_Pred"]:
+            if col in row and pd.notna(row[col]):
+                rec[col] = float(row[col])
+        records.append(rec)
+    return records
+
+
 def update_oof_history(
     master_path: Path,
     archive_dir: Path,
@@ -103,24 +135,7 @@ def update_oof_history(
     if len(day_actuals) == 0:
         return {"status": "no_actuals"}
 
-    # Eşleştir (Saat bazında)
-    day_forecast["hour"] = day_forecast["Datetime"].dt.hour
-    day_actuals_dict = {int(r[raw_hour_col]): r[raw_target_col] for _, r in day_actuals.iterrows()}
-
-    chronos_fallback = _is_chronos_fallback(day_forecast)
-
-    records = []
-    for _, row in day_forecast.iterrows():
-        h = int(row["hour"])
-        actual = day_actuals_dict.get(h)
-        if actual is None or np.isnan(actual):
-            continue
-        rec = {"date": str(last_actual_date), "hour": h, "actual": float(actual),
-               "chronos_fallback": chronos_fallback}
-        for col in ["XGB_Pred", "LGBM_Pred", "CAT_Pred", "CHRONOS_Pred", "Ensemble_Pred"]:
-            if col in row and pd.notna(row[col]):
-                rec[col] = float(row[col])
-        records.append(rec)
+    records = _records_for_day(day_forecast, day_actuals, last_actual_date, raw_target_col, raw_hour_col)
 
     if not records:
         return {"status": "no_records"}
