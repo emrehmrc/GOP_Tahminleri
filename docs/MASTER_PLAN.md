@@ -6,7 +6,7 @@
 |-----|------|-------|
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
 | 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
-| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | ⬜ |
+| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 başladı 2026-07-13 (2a-1 tamam) |
 | 3 | Multi-tenant çekirdek | ⬜ |
 | 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ⬜ |
 | 5 | Hijyen + dokümantasyon | ⬜ |
@@ -129,9 +129,16 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
 `monitoring/scorecard.py`, `backtest_walkforward.py`, `optimize_ensemble_offline.py`, `analyze_models_30d.py`.
 
 ### 2a. Ölçüm altyapısı (önce görünürlük)
-1. **Naive benchmark scorecard'a:** her gün `mape_naive_lag168` (geçen haftanın aynı günü = tahmin)
-   hesaplanır. "Model lag168'den iyi mi?" sorusu kalıcı otomatik cevap bulur — 07-12'de ADM muhtemelen
-   naive'in ALTINDA kaldı; bu bir daha görünmez kalmayacak.
+1. ✅ **Naive benchmark scorecard'a** (2026-07-13): `monitoring/scorecard.py` — `_joined_hourly` artık
+   `actuals_log_v`'ye ikinci kez (168 saat/7 gün kaydırılmış) LEFT JOIN yapıyor; `daily_scorecard`'a
+   `mape_naive_lag168` + `beats_naive_lag168` (bool) kolonları eklendi. `window_report`'a
+   `vs_naive_lag168_bps` (pozitif=model naive'i geçiyor) + `beats_naive_lag168_rate` eklendi.
+   Sistemin ilk haftasında (henüz 7 gün öncesi actual yok) NaN kalır, crash etmez. "Model lag168'den
+   iyi mi?" sorusu artık her gün otomatik cevaplanıyor — 07-12 Pazar'ın bir daha sessizce geçmemesi
+   için `daily_scorecard` sorgulanabilir. 5 yeni test (`tests/test_scorecard_naive_benchmark.py`,
+   biri 12 Temmuz'un sentetik tekrarı: model düz devam ediyor, gerçek düşüyor, geçen hafta zaten o
+   düşüşü gösteriyor → `beats_naive_lag168=False` doğrulanıyor). `pytest tests/` 52/52 yeşil.
+   UI'ın bunu göstermesi Emre'nin kararı — veri hazır, dashboard'a dokunulmadı.
 2. **Per-model × saat-blok × gün-tipi scorecard:** `mape_{model}` kırılımı HOUR_BLOCKS × daytype
    (hafta içi/Cmt/Paz/özel gün) bazında. `analyze_models_30d.py` REGEN dosyaları yerine
    forecast_log + actuals_log'dan beslenir (canlı veriyle her gün koşabilir hale gelir).

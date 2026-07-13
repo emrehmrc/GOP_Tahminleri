@@ -65,6 +65,12 @@ def _me(pred: pd.Series, actual: pd.Series) -> float:
 
 
 def _joined_hourly(con: duckdb.DuckDBPyConnection, window_days: int) -> pd.DataFrame:
+    """Faz 2 (2026-07-13): a7 — 168 saat (7 gün) önceki aynı-saat actual, naive
+    benchmark için. "Model geçen haftanın aynı gününü kopyalamaktan iyi mi?"
+    sorusunun kalıcı otomatik cevabı — 07-12 Pazar post-mortem'inde ADM'nin
+    muhtemelen bu basit taban çizgisinin bile ALTINDA kaldığı görüldü, ama bunu
+    ölçen hiçbir mekanizma yoktu. LEFT JOIN: sistemin ilk haftasında a7 doğal
+    olarak NULL — bu satırlar için mape_naive_lag168 NaN kalır (hata değil)."""
     cutoff = (date.today() - pd.Timedelta(days=window_days)).isoformat()
     sql = """
         SELECT f.edas_id, f.target_date, f.horizon_day, f.target_ts, f.flag_holiday,
@@ -72,10 +78,13 @@ def _joined_hourly(con: duckdb.DuckDBPyConnection, window_days: int) -> pd.DataF
                f.y_pred_ens_raw, f.y_pred_final, f.meta_method,
                f.wx_temp_fcst, f.wx_ghi_fcst,
                a.y_actual, a.wx_temp_actual, a.wx_ghi_actual,
-               a.data_quality_flag, a.known_event
+               a.data_quality_flag, a.known_event,
+               a7.y_actual AS y_actual_lag168
         FROM forecast_log_v f
         INNER JOIN actuals_log_v a
           ON f.edas_id = a.edas_id AND f.target_ts = a.target_ts
+        LEFT JOIN actuals_log_v a7
+          ON f.edas_id = a7.edas_id AND a7.target_ts = f.target_ts - INTERVAL '7 days'
         WHERE f.target_date >= ? AND a.y_actual IS NOT NULL
     """
     return con.execute(sql, [cutoff]).df()
@@ -105,6 +114,7 @@ def _daily_agg(hourly: pd.DataFrame) -> pd.DataFrame:
             "mape_chronos": _mape(g["y_pred_chronos"], actual),
             "mape_ens_raw": _mape(g["y_pred_ens_raw"], actual),
             "mape_final": _mape(pred_final, actual),
+            "mape_naive_lag168": _mape(g["y_actual_lag168"], actual),
             "meta_method": (
                 g["meta_method"].mode().iat[0]
                 if "meta_method" in g.columns and g["meta_method"].notna().any() else None
@@ -113,6 +123,13 @@ def _daily_agg(hourly: pd.DataFrame) -> pd.DataFrame:
             "data_quality_flag_count": int((g["data_quality_flag"].fillna("") != "").sum()),
             "known_event_present": bool(g["known_event"].notna().any()),
         }
+
+        # "Model geçen haftayı kopyalamaktan iyi mi?" — direkt sorulabilir bool.
+        mape_final = row["mape_final"]
+        mape_naive = row["mape_naive_lag168"]
+        row["beats_naive_lag168"] = (
+            bool(mape_final < mape_naive) if not (np.isnan(mape_final) or np.isnan(mape_naive)) else None
+        )
 
         for label, hrs in HOUR_BLOCKS.items():
             mask = hours.isin(hrs)
@@ -252,7 +269,7 @@ def window_report(config: TenantConfig, windows: tuple[int, ...] | None = None,
     metric_cols = [
         "mape", "wape", "rmse", "me",
         "mape_xgb", "mape_lgbm", "mape_cat", "mape_chronos",
-        "mape_ens_raw", "mape_final",
+        "mape_ens_raw", "mape_final", "mape_naive_lag168",
         "mape_night", "mape_morning", "mape_pv", "mape_evening",
         "temp_fcst_error", "ghi_fcst_error",
     ]
@@ -264,6 +281,17 @@ def window_report(config: TenantConfig, windows: tuple[int, ...] | None = None,
         agg["corrector_gain_bps"] = (
             (agg["mape_ens_raw"] - agg["mape_final"]) * 100
             if agg["mape_ens_raw"] is not None and agg["mape_final"] is not None else None
+        )
+        # Faz 2: model son `w` günde geçen haftayı kopyalamaktan kaç bps daha
+        # iyi/kötü — pozitif=model naive'i geçiyor, negatif=model naive'den kötü
+        # (07-12 Pazar'da ADM için muhtemelen negatifti, bu artık ölçülüyor).
+        agg["vs_naive_lag168_bps"] = (
+            (agg["mape_naive_lag168"] - agg["mape_final"]) * 100
+            if agg.get("mape_naive_lag168") is not None and agg["mape_final"] is not None else None
+        )
+        agg["beats_naive_lag168_rate"] = (
+            float(sub["beats_naive_lag168"].dropna().mean())
+            if "beats_naive_lag168" in sub.columns and sub["beats_naive_lag168"].notna().any() else None
         )
         agg["alert_days"] = int(sub["alert_flag"].sum()) if "alert_flag" in sub.columns else None
         report[w] = agg

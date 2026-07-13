@@ -7,10 +7,19 @@ durumu İzleme'de sessizce görünmez kalıyordu).
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import duckdb
 import pandas as pd
+
+# monitoring/forecast_logger.py bare `from holiday_calendar import ...` yapar --
+# src/ sys.path'te olmadan bu dosya TEK BASINA calistirilirsa (pytest tests/
+# yerine pytest tests/test_forecast_log_run_count.py) import hatasi verir.
+# Diger test dosyalarinin (config_live import eden) sys.path yan etkisine
+# guvenmek yerine burada da acikca ekleniyor.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from monitoring.forecast_logger import _write_typed_parquet, rebuild_duckdb_views
 from monitoring.schema import FORECAST_LOG_SCHEMA
