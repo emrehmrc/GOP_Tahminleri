@@ -189,9 +189,29 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    4 yeni test (`tests/test_actuals_log_verify_write.py`: happy path + dosya-yok + satır-eksik + upsert_by_date
    propagation). `pytest tests/` 67/67 yeşil. **Bu, 2b-1'in altındaki (aşağıdaki) tam post-mortem'i artık
    mümkün kılıyor.**
-2. **Tam post-mortem:** ADM 07-12 actual'ı artık `actuals_log`'da — 2a-3 araçlarıyla ADM+GDZ raporu
-   üretilebilir; ADM'de "T+2 > T+1 doğruluk" tersliğinin kökü incelenir (recursive T+1 zinciri, güncel
-   gün feature'ları, hava tahmini farkı).
+2. ✅ **Tam post-mortem üretildi (2026-07-13):** `generate_postmortem.py 2026-07-12` ADM+GDZ ikisi için de
+   çalıştı (`output/daily/2026-07-12/postmortem_{ADM,GDZ}.md`). **Beklenmedik bulgu — önceki gece/akşam
+   hipotezinden FARKLI bir kök:**
+   - **ADM:** Final %4.05 MAPE — hem ham Ensemble'dan (%3.25) HEM naive lag168'den (%3.28) DAHA KÖTÜ
+     (postprocess yine zarar veriyor — 07-09 post-mortem'indeki desenle aynı, bkz.
+     [[adm-07-09-postprocess-hata-analizi-2026-07-10]]). En kötü 3 saat HEPSİ öğlen/PV bloğunda
+     (10:00/12:00/16:00, APE %7.6-8.1, hepsi OVER-forecast +122..+142 MWh) — `pv` saat-bloğu MAPE %7.02,
+     diğer bloklardan (night %3.75, morning %2.40, evening %2.35) kat kat kötü. CAT tek başına en iyi
+     model (%2.35) — "CAT her yerde kötü" varsayımı bu günde geçerli değil. **Sonuç: 12 Temmuz Pazar
+     sorunu gece-akşam genel seviye kayması değil, ÖĞLEN/PV BLOĞUNA ÖZGÜ bir over-forecast** — muhtemelen
+     postprocess'teki `pv_bias_delta` düzeltmesi bu güneşli Pazar'da yanlış yönde çalışıyor (self-tüketim
+     nedeniyle şebekeden çekim beklenenden daha çok düşmüş olabilir). **Sonraki A/B adayı:** pv_bias_delta
+     düzeltmesinin Final'e katkısını izole edip walkforward A/B ile test etmek (governance: kanıtsız
+     canlıya girmez).
+   - **GDZ:** Final %2.80 = ham Ensemble (postprocess bu günde nötr), naive lag168'i (%3.45) GEÇTİ ✅.
+     En kötü saatler gece (22:00/23:00/02:00), hepsi UNDER-forecast — bu, ADM'den farklı ve önceden
+     bilinen "akşam+gece under-forecast" GDZ desenine ([[stlf-faz2b-lag168-hipotezi-reddedildi-2026-07-13]])
+     uygun.
+   - **Ders:** ADM ve GDZ'nin Pazar sorunu AYNI kök neden değil — GDZ'de bilinen gece/akşam bias'ı devam
+     ediyor (rolling/adaptif 2c çözümü hâlâ geçerli aday), ADM'de ise yeni keşfedilen PV-bloğu postprocess
+     sorunu ayrı bir hipotez olarak ele alınmalı. actuals_log gap'i düzeltilince GDZ tarafında da AYNI
+     eksik (07-11/07-12) bulundu ve aynı yöntemle backfill edildi (paylaşımlı `monitoring/forecast_logger.py`
+     kodu sayesinde write-then-verify düzeltmesi otomatik olarak GDZ'yi de kapsıyor).
 3. ✅ **ADM: haftalık-profil vurgusu (lag168 hipotezi) — TEST EDİLDİ, REDDEDİLDİ** (2026-07-13):
    - Feature importance (ADM XGB weekend/Sunday modeli, `models/live_xgboost_we.json`): `Lag24h` en
      önemli feature (2.44M gain), `Lag168h` çok daha düşük (9. sırada, 222K gain) — model Pazar'ı
