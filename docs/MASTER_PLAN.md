@@ -6,7 +6,7 @@
 |-----|------|-------|
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
 | 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
-| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a-1, 2a-2 tamam) |
+| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a tamam) |
 | 3 | Multi-tenant çekirdek | ⬜ |
 | 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ⬜ |
 | 5 | Hijyen + dokümantasyon | ⬜ |
@@ -155,10 +155,21 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    **Not:** eski script'in ürettiği `output/model_analysis_report.csv` ve `output/model_hourly_mape.csv`
    artık üretilmiyor (yeni çıktı `output/analysis/` altında farklı adlarla) — eski dosyalar orphan kaldı,
    silme için kullanıcı onayı bekliyor (Faz 1'deki "dosya adı açık onay" dersi).
-3. **Günlük post-mortem artefaktı (backend; "Günün Karnesi"nin veri hali):** actual gelince
-   `output/daily/<gün>/postmortem_<edas>.{md,json}` — dünün tahmini vs actual saatlik, per-model MAPE
-   + en kötü 3 saat, naive benchmark farkı, hava tahmini hatası payı (perfect-prog ayrıştırması),
-   gün-tipi bağlamı. Emre UI'da gösterebilir; kullanıcı LLM chat'ine yapıştırabilir.
+3. ✅ **Günlük post-mortem artefaktı** (2026-07-13): `monitoring/postmortem.py` (yeni, ADM+GDZ
+   paylaşımlı) — `build_postmortem(config, target_date, horizon)` forecast_log_v/actuals_log_v'den
+   tek günün karnesini üretir (per-model MAPE, en kötü 3 saat, naive lag168 farkı, saat-bloğu MAPE,
+   gün-tipi bağlamı, kaba hava-tahmini-hata payı); `render_postmortem_md` + `write_postmortem` md/json
+   yazar. CLI: `generate_postmortem.py [target_date]` (ADM+GDZ, varsayılan=dün) →
+   `output/daily/<gün>/postmortem_<edas>.{md,json}`. Actual henüz gelmemişse `status="no_actuals"`
+   ile sessizce atlar. Gerçek veriyle doğrulandı (2026-07-09: ADM Final %3.39, Ensemble %2.02 —
+   postprocess'in Final'i Ensemble'dan kötüleştirdiği zaten bilinen deseni bu günde de gösterdi;
+   `beats_naive_lag168=False`). **Kapsam sınırı (bilerek):** "hava tahmini hatası payı" TAM
+   perfect-prog ayrıştırması değil (model gerçek hava ile yeniden koşturulmuyor, sadece
+   wx_temp_fcst/wx_ghi_fcst sapması raporlanıyor) — tam ayrıştırma Faz 4b'ye (diagnostic HTML)
+   bırakıldı. 4 yeni test (`tests/test_postmortem.py`, biri 12 Temmuz sentetik tekrarı).
+   `pytest tests/` 59/59 yeşil. Henüz `finalize_run`'a bağlanmadı (Faz 6 otomasyon zamanı ya da
+   ayrı bir sonraki adımda değerlendirilecek) — şimdilik CLI olarak manuel/gelecekteki
+   zamanlanmış görevle çalıştırılıyor.
 
 ### 2b. Pazar/hafta sonu problemi (12 Tem post-mortem'i + kalıcı çözüm)
 1. **Tam post-mortem:** ADM 07-12 actual'ı tam ingest edilince 2a-3 araçlarıyla ADM+GDZ raporu üretilir;
