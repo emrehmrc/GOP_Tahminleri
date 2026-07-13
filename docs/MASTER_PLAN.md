@@ -261,8 +261,16 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    `output/analysis/ensemble_ab_gdz_ramp_bias_2026-07-13.md` (GDZ tarafında, git-ignored).
    **Ders:** statik düzeltme yerine 2c'deki rolling/adaptif yaklaşım (EWA/rolling-30g) muhtemelen
    doğru çözüm — bu bulgu 2c'nin önceliğini artırıyor.
-6. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
-   gelir (ADM=haftalık profil ağırlıklı, GDZ=hava ağırlıklı) — Faz 3'teki multi-tenant işinin öncüsü.
+6. ✅ **Tenant feature profili — SADECE METADATA (2026-07-13):** `pipeline/03_build_features.py` +
+   `04_predict_48h.py` ADM/GDZ arasında **tamamen bağımsız iki codebase** olduğu keşfedildi (~%100 diff —
+   ADM Boray `DataManager` portu, GDZ kendi `gbdt_features.py`'si; feature listesi zaten hiçbir yerde
+   whitelist değil, DataFrame şemasından dinamik türüyor). `TenantConfig`'in bu katmana hiç dokunmadığı
+   ortaya çıkınca, "feature seti TenantConfig'ten yönetilebilir hale gelsin" hedefi aslında Faz 3'ün
+   riskli ortaklaştırma işiydi — ayrı bir "küçük öncü adım" olarak yapmak yapay bölünme olurdu (kullanıcı
+   kararı). Bunun yerine `monitoring/tenant_config.py`'ye SADECE betimleyici, davranışa etkisi sıfır olan
+   `feature_profile: str` alanı eklendi (`config_live.py`: `"weekly_profile_weighted"`,
+   `config_live_gdz.py`: `"weather_weighted"` — 12 Temmuz post-mortem bulgularına referansla). `pytest
+   tests/` 67/67 yeşil (davranış değişmedi). Gerçek ortaklaştırma Faz 3'e devredildi.
 
 ### 2c. Learning ensemble (son 30 günden öğrenen) 🔶 kısmen (2026-07-13)
 

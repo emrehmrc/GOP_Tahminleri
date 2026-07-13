@@ -315,6 +315,10 @@ TENANT = TenantConfig(
     alerts_dir=ALERTS_DIR,
     log_backup_dir=LOG_BACKUP_DIR,
     weather_station_temp_cols=[f"{s}_app_temp_actual" for s in WEATHER_STATIONS],
+    # 12 Temmuz post-mortem (2026-07-13): ADM ağırlıklı ticarethane/turizm ->
+    # sıcaklık duyarlılığı düşük, haftalık profil (lag24/lag168) daha belirleyici.
+    # Betimleyici metadata, bkz. monitoring/tenant_config.py:feature_profile.
+    feature_profile="weekly_profile_weighted",
     horizon_day_label_offset=0,   # ADM: horizon_days=1 -> "T+1" (dogrudan)
     z_baseline_window_days=Z_BASELINE_WINDOW_DAYS,
     z_warmup_min_days=Z_WARMUP_MIN_DAYS,

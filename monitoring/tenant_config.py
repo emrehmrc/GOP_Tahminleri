@@ -27,6 +27,14 @@ class TenantConfig:
 
     weather_station_temp_cols: list[str] = field(default_factory=list)
 
+    # Faz 2b-4 (2026-07-13): sadece BETİMLEYİCİ metadata — hangi tenant'ın
+    # feature mühendisliği hangi sinyale daha çok ağırlık veriyor (bkz. 12 Temmuz
+    # post-mortem bulguları). Şu an hiçbir koda davranışsal etkisi YOK; ADM ve
+    # GDZ'nin pipeline/03_build_features.py + 04_predict_48h.py'si hâlâ tamamen
+    # ayrı codebase (bkz. MASTER_PLAN.md Faz 2b-4 notu) — bu alan sadece Faz 3
+    # ortaklaştırması sırasında referans/dokümantasyon amaçlı.
+    feature_profile: str = "unspecified"
+
     # GDZ'de "T1"=issue günü (horizon_days=0), ADM'de "T+1"=issue+1 (horizon_days=1).
     # horizon_day STRING alanı (geriye-uyumluluk) bu farkla üretilir:
     # label = f"T+{horizon_days + horizon_day_label_offset}".
