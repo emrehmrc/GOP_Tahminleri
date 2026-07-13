@@ -172,10 +172,27 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    zamanlanmış görevle çalıştırılıyor.
 
 ### 2b. Pazar/hafta sonu problemi (12 Tem post-mortem'i + kalıcı çözüm)
-1. **Tam post-mortem:** ADM 07-12 actual'ı tam ingest edilince 2a-3 araçlarıyla ADM+GDZ raporu üretilir;
-   ADM'de "T+2 > T+1 doğruluk" tersliğinin kökü incelenir (recursive T+1 zinciri, güncel gün feature'ları,
-   hava tahmini farkı).
-2. ✅ **ADM: haftalık-profil vurgusu (lag168 hipotezi) — TEST EDİLDİ, REDDEDİLDİ** (2026-07-13):
+1. ✅ **actuals_log ingestion boşluğu bulundu + kapatıldı (2026-07-13):** `master.parquet` 07-12'ye kadar
+   doluyken `actuals_log` parquet'leri 07-10'da donmuştu (`monitoring.duckdb`'nin `actuals_log_v`'si
+   07-11/07-12'yi hiç görmüyordu). Kök neden **memory'deki "bare except yutuyor" hipotezinin AKSİNE**
+   bulunamadı: `logs/2026-07-12_run.log` ve `2026-07-13_run.log` `[ActualsLog] 24 satır upsert edildi`
+   diye BAŞARI logluyordu (exception yok), kod tabanında `actuals_log` dosyalarını silen/üzerine tam
+   yazan hiçbir yer yok (`asof_regen.py` sandbox'ı bu dizini hiç yönlendirmiyor), fonksiyonun kendisi
+   elle çağrıldığında sorunsuz kalıcı yazıyor — yazım o an gerçekten oluyor ama dosya sonradan diskte
+   yok, dış etken şüpheli (kanıtlanamadı). **Düzeltme:** `monitoring/forecast_logger.py:upsert_actuals`'a
+   `write_forecast_log`'daki (Faz 1) ile AYNI "yaz-sonra-doğrula" deseni eklendi — yazımdan hemen sonra
+   diskten geri okunup satır sayısı doğrulanıyor, uyuşmazsa `RuntimeError`. `pipeline/01_ingest_actual.py`
+   `run()` dönüşüne de eksik olan `actuals_log` anahtarı eklendi (hesaplanıp sadece print ediliyordu,
+   dönüş sözlüğünde HİÇ yoktu — 2c-1'de oof'a yapılan görünürlük düzeltmesinin unutulan eşleniği).
+   07-11 ve 07-12 için eksik dosyalar `master.parquet`'ten (gerçek, zaten doğrulanmış veri) backfill
+   edildi, `rebuild_duckdb_views` ile view yeniden kuruldu — `actuals_log_v` artık 07-12'ye kadar dolu.
+   4 yeni test (`tests/test_actuals_log_verify_write.py`: happy path + dosya-yok + satır-eksik + upsert_by_date
+   propagation). `pytest tests/` 67/67 yeşil. **Bu, 2b-1'in altındaki (aşağıdaki) tam post-mortem'i artık
+   mümkün kılıyor.**
+2. **Tam post-mortem:** ADM 07-12 actual'ı artık `actuals_log`'da — 2a-3 araçlarıyla ADM+GDZ raporu
+   üretilebilir; ADM'de "T+2 > T+1 doğruluk" tersliğinin kökü incelenir (recursive T+1 zinciri, güncel
+   gün feature'ları, hava tahmini farkı).
+3. ✅ **ADM: haftalık-profil vurgusu (lag168 hipotezi) — TEST EDİLDİ, REDDEDİLDİ** (2026-07-13):
    - Feature importance (ADM XGB weekend/Sunday modeli, `models/live_xgboost_we.json`): `Lag24h` en
      önemli feature (2.44M gain), `Lag168h` çok daha düşük (9. sırada, 222K gain) — model Pazar'ı
      tahmin ederken Cumartesi'nin (dün) desenine geçen Pazar'dan daha çok güveniyor. Bu, "haftalık
@@ -195,7 +212,7 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
      rafa kaldırıldı — kanıt yok.
    - GDZ akşam-piki + sabah-ramp analizi (aşağıdaki madde) tamamlandı; ADM tarafında Pazar sorunu için
      başka bir hipotez (örn. gerçek 07-12 post-mortem'i actuals_log dolunca) gerekebilir.
-3. ✅ **GDZ: akşam piki + gece profili — rezidüel bias ölçüldü** (2026-07-13, 2a-2 aracıyla):
+4. ✅ **GDZ: akşam piki + gece profili — rezidüel bias ölçüldü** (2026-07-13, 2a-2 aracıyla):
    `model_segment_breakdown` ile 10 günlük ME (bias) kırılımı: **evening + night** bloklarında TÜM
    gün tiplerinde sistematik **under-forecast** (ME −75 ile −215 MWh arası), **morning** bloğunda ise
    güçlü **over-forecast** (+67 ile +307 MWh). Bu akşam-piki bulgusunu doğruluyor VE önceden
@@ -210,7 +227,7 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    `output/analysis/ensemble_ab_gdz_ramp_bias_2026-07-13.md` (GDZ tarafında, git-ignored).
    **Ders:** statik düzeltme yerine 2c'deki rolling/adaptif yaklaşım (EWA/rolling-30g) muhtemelen
    doğru çözüm — bu bulgu 2c'nin önceliğini artırıyor.
-4. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
+5. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
    gelir (ADM=haftalık profil ağırlıklı, GDZ=hava ağırlıklı) — Faz 3'teki multi-tenant işinin öncüsü.
 
 ### 2c. Learning ensemble (son 30 günden öğrenen) 🔶 kısmen (2026-07-13)

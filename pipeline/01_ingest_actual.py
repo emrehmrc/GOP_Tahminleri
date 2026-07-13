@@ -239,11 +239,15 @@ def run(target_date: Optional[date] = None, source_name: str = "aydem") -> dict:
         oof_result = {"status": "check_failed", "error": str(e)}
 
     # Faz 0: actuals_log D+1 yük dalgası (y_actual + data_quality_flag)
+    # Faz 2 (2026-07-13): sonuç artık run() dönüşünde GÖRÜNÜR (eskiden `al_result`
+    # hesaplanıp sadece print edilirdi, dönüş sözlüğüne hiç eklenmiyordu — 07-11/
+    # 07-12 için actuals_log dosyası hiç oluşmadığı halde bu sessizce fark edilmedi).
     try:
         al_result = update_actuals_log(validated)
         print(f"     [ActualsLog] {al_result}")
     except Exception as e:
         print(f"     [ActualsLog] Uyarı: {e}")
+        al_result = {"status": "check_failed", "error": str(e)}
 
     return {
         "status": "ok",
@@ -253,6 +257,7 @@ def run(target_date: Optional[date] = None, source_name: str = "aydem") -> dict:
         "master_total": len(master),
         "data_quality": dq_result,
         "oof": oof_result,
+        "actuals_log": al_result,
     }
 
 

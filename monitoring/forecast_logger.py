@@ -401,6 +401,20 @@ def upsert_actuals(config: TenantConfig, target_date: str, updates: pd.DataFrame
     merged["target_date"] = target_date
     _write_typed_parquet(merged, ACTUALS_LOG_SCHEMA, path)
 
+    # Verify-after-write (2026-07-13): forecast_log'daki ile aynı desen — 07-11/07-12
+    # için ActualsLog "N satır upsert edildi" logu başarı gösterdiği halde dosya
+    # sonradan diskte bulunamadı (kök nedeni statik kodda tespit edilemedi, dış bir
+    # etken şüpheli). "Exception fırlamadı" tek başına yeterli güvence değil —
+    # yazımdan hemen sonra diskten geri okuyup satır sayısını doğrula.
+    if not path.exists():
+        raise RuntimeError(f"[ActualsLog] yazım başarısız (dosya yok): {path}")
+    verify = pd.read_parquet(path, columns=["target_date"])
+    if len(verify) != len(merged):
+        raise RuntimeError(
+            f"[ActualsLog] yazım doğrulama hatası: beklenen {len(merged)} satır, "
+            f"okunan {len(verify)} -> {path}"
+        )
+
 
 def upsert_by_date(config: TenantConfig, updates: pd.DataFrame) -> int:
     """updates: 'target_ts' dahil her kolon. Tarihe göre partition edip upsert eder.
