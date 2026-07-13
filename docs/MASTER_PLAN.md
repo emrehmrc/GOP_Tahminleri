@@ -6,7 +6,7 @@
 |-----|------|-------|
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
 | 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
-| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a tamam) |
+| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a+2b tamam, 2c kaldı) |
 | 3 | Multi-tenant çekirdek | ⬜ |
 | 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ⬜ |
 | 5 | Hijyen + dokümantasyon | ⬜ |
@@ -201,9 +201,15 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    güçlü **over-forecast** (+67 ile +307 MWh). Bu akşam-piki bulgusunu doğruluyor VE önceden
    bilinmeyen bir "sabah rampası çok erken/dik" desenini ortaya çıkarıyor — muhtemelen aynı ramp-
    zamanlama sorununun iki ucu. Segment CSV: `output/analysis/model_segment_mape_GDZ.csv`.
-   **Düzeltme (bias-correction) denemesi HENÜZ YAPILMADI** — walkforward A/B ile test edilmeden
-   canlıya girmez (governance). GDZ ensemble hâlâ eşit-ağırlık — segment ağırlıklandırmadan (2c) en
-   çok GDZ kazanacak.
+   **Düzeltme denemesi yapıldı ve REDDEDİLDİ** (`experiments/gdz_ramp_bias_correction_ab.py`):
+   6 günlük fit penceresinden (07-01..07-06) saat-bazlı sabit bias öğrenilip 4 günlük test
+   penceresinde (07-07..07-10) uygulandı — genel MAPE %2.94 → %4.61 (**1.67pp KÖTÜLEŞME**).
+   evening bloğu iyileşti (%2.36→%1.46) ama morning (%4.36→%7.99) ve night (%1.91→%5.39) çok
+   kötüleşti. **Sonuç: sabit/statik saatlik bias genelleşmiyor** — bias muhtemelen zamanla/havayla
+   değişiyor, sabit bir ofset değil. Canlıya hiçbir değişiklik girmedi. Rapor:
+   `output/analysis/ensemble_ab_gdz_ramp_bias_2026-07-13.md` (GDZ tarafında, git-ignored).
+   **Ders:** statik düzeltme yerine 2c'deki rolling/adaptif yaklaşım (EWA/rolling-30g) muhtemelen
+   doğru çözüm — bu bulgu 2c'nin önceliğini artırıyor.
 4. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
    gelir (ADM=haftalık profil ağırlıklı, GDZ=hava ağırlıklı) — Faz 3'teki multi-tenant işinin öncüsü.
 
