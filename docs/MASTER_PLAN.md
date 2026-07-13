@@ -4,7 +4,7 @@
 
 | Faz | Konu | Durum |
 |-----|------|-------|
-| 0 | Güvence altına alma (commit + baseline + yedek) | ⬜ |
+| 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
 | 1 | Güvenilirlik + veri kalitesi | ⬜ |
 | 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | ⬜ |
 | 3 | Multi-tenant çekirdek | ⬜ |
@@ -60,14 +60,18 @@ otomasyon son faz; LLM analizi = chat'e yapıştırılacak export (API değil); 
 
 ---
 
-## FAZ 0 — Güvence altına alma (yarım gün)
+## FAZ 0 — Güvence altına alma ✅ TAMAMLANDI (2026-07-13)
 
-1. Uncommitted working set mantıklı parçalara bölünerek commit edilir (monitoring/ + shim'ler; tests/;
-   diagnostic_core; stacking/optimize; UI dosyaları OLDUĞU GİBİ tek commit — içeriğine dokunmadan;
-   doc'lar). `git tag baseline-2026-07-13`.
-2. `pytest tests/` baseline sonucu kaydedilir.
-3. `data/backups/` açılır; `master.parquet`, `weather_history.parquet`, `oof_history.parquet` kopyalanır.
-4. Kullanılmıyorsa `.claude/worktrees/beautiful-shirley-bcbf48` kaldırılır.
+1. ~~Uncommitted working set mantıklı parçalara bölünerek commit edilir~~ — 27 dosya 6 mantıklı commit'e
+   bölündü: `9547b5e` monitoring paketi+wiring, `5202325` tests/, `8e446d6` diagnostic_core,
+   `dc09787` offline ensemble araçları, `28baed0` asof_regen sandbox+rapor/mail/backtest,
+   `7b15d00` UI checkpoint (içeriğe dokunmadan), `7218d4d` docs. Working tree temiz.
+   `git tag baseline-2026-07-13` atıldı.
+2. ~~`pytest tests/` baseline~~ — 32/32 yeşil (commit öncesi ve sonrası doğrulandı).
+3. ~~`data/backups/`~~ — `master_2026-07-13.parquet`, `weather_history_2026-07-13.parquet`,
+   `oof_history_2026-07-13.parquet` yedeklendi.
+4. ~~`.claude/worktrees/beautiful-shirley-bcbf48`~~ — kaldırıldı (HEAD'i b714150 zaten master'ın atasıydı,
+   kayıp iş yok; OneDrive dosya kilidi yüzünden PowerShell force-remove gerekti).
 
 ## FAZ 1 — Güvenilirlik + veri kalitesi: "hiçbir tahmin sessizce kaybolmaz, hiçbir bozuk veri sessizce girmez" (1-2 gün)
 
