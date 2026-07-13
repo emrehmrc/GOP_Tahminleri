@@ -31,14 +31,15 @@ import logging
 import traceback
 
 import streamlit as st
+import forecast_adjustment
 
-from common import (
+from dashboard_common import (
     import_pipeline_step,
     run_gdz_pipeline_async, gdz_stdout_path, gdz_summary_path,
 )
 # common.py LIVE_DIR/src'i sys.path'e ekledi → run_context doğrudan import edilebilir.
 from run_context import start_run, archive_models, prune_archive, write_summary
-from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip
+from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip, reconcile
 from scorecard import build_daily_scorecard, check_alerts
 
 log = logging.getLogger("adm_live")  # handler'ları start_run() kurar
@@ -117,6 +118,19 @@ def _render_adm():
                             st.warning(f"⚠ Forecast log yazılamadı: {log_err}")
 
                         try:
+                            reconcile_result = reconcile()
+                            st.session_state["forecast_steps"]["reconcile"] = reconcile_result
+                            n_healed = reconcile_result.get("heal", {}).get("n_healed", 0)
+                            if n_healed:
+                                st.info(f"🩹 Arşivden {n_healed} eksik/kısmi hücre onarıldı")
+                            n_gaps = len(reconcile_result.get("gaps", []))
+                            if n_gaps:
+                                st.warning(f"⚠ {n_gaps} hücre gerçek kayıp (arşiv de yok) — logs/gaps/ altına bak")
+                        except Exception as heal_err:
+                            log.warning(f"Reconcile (heal+tamlık) hatası (teslimi etkilemez): {heal_err}")
+                            st.warning(f"⚠ Reconcile başarısız: {heal_err}")
+
+                        try:
                             st.session_state["forecast_steps"]["scorecard"] = build_daily_scorecard()
                             alerts = check_alerts()
                             st.session_state["forecast_steps"]["alerts"] = {"count": len(alerts)}
@@ -125,16 +139,6 @@ def _render_adm():
                         except Exception as sc_err:
                             log.warning(f"Scorecard/alarm hatası (teslimi etkilemez): {sc_err}")
                             st.warning(f"⚠ Scorecard hesaplanamadı: {sc_err}")
-
-                        # Adım 07 — STLF LIVE RAPOR (Excel, ADM+GDZ 5 tablo)
-                        try:
-                            result07 = import_pipeline_step("07_report_excel").run()
-                            st.session_state["forecast_steps"]["07_report"] = result07
-                            st.write(f"✓ **STLF Rapor (Excel)** — {result07.get('file', '?')}")
-                            log.info(f"══ 07_report_excel TAMAM | {result07}")
-                        except Exception as rep_err:
-                            log.warning(f"STLF Rapor hatası (teslimi etkilemez): {rep_err}")
-                            st.warning(f"⚠ STLF Rapor oluşturulamadı: {rep_err}")
 
                         # Adım 08 — STLF DIAGNOSTIC HTML (Chart.js dashboard)
                         try:
@@ -146,18 +150,12 @@ def _render_adm():
                             log.warning(f"Diagnostic HTML hatası (teslimi etkilemez): {diag_err}")
                             st.warning(f"⚠ Diagnostic HTML oluşturulamadı: {diag_err}")
 
-                        # Adım 09 — Email rapor (SMTP ayarlanmamışsa sessizce atlanır)
-                        try:
-                            result09 = import_pipeline_step("09_email_report").run()
-                            st.session_state["forecast_steps"]["09_email"] = result09
-                            if result09.get("status") == "ok":
-                                st.write(f"✓ **Email** — gönderildi: {', '.join(result09.get('to', []))}")
-                            else:
-                                st.write(f"⏭ **Email** — {result09.get('reason', result09.get('status'))}")
-                            log.info(f"══ 09_email_report TAMAM | {result09}")
-                        except Exception as mail_err:
-                            log.warning(f"Email rapor hatası (teslimi etkilemez): {mail_err}")
-                            st.warning(f"⚠ Email gönderilemedi: {mail_err}")
+                        # Adım 09 — Email: burada OTOMATIK ATILMAZ. Pipeline
+                        # diagnostic'te biter, "onay bekliyor" durumuna geçer.
+                        # Email yalnızca aşağıdaki onay panelinden "Müşteriye
+                        # Gönder" ile tetiklenir (bkz. _render_approval_panel).
+                        st.info("📋 Tahmin üretildi — diagnostic'i inceleyip "
+                                "aşağıdan **Müşteriye Gönder** ile onaylayın.")
                 except Exception as e:
                     st.session_state["forecast_error"] = traceback.format_exc()
                     log.error(f"══ {step_name} HATA\n{traceback.format_exc()}")
@@ -179,6 +177,162 @@ def _render_adm():
     deliver_result = st.session_state.get("forecast_steps", {}).get("06_deliver")
     if deliver_result:
         st.success(f"Teslim dosyası: {deliver_result.get('output_file', '?')}")
+
+
+def _render_approval_panel():
+    """Müşteri teslimi — insan onayı bölümü.
+
+    Pipeline artık email'i otomatik atmıyor. Panel hem ADM hem GDZ'nin BUGÜN
+    çalışıp çalışmadığını ve hedef tarihlerinin eşleşip eşleşmediğini
+    (check_readiness, diskteki <tarih>_summary.json'lardan — session_state'e
+    bağlı değil) kontrol eder; "Müşteriye Gönder" yalnızca ikisi de hazırsa
+    aktif olur (kullanıcı talebi: ADM+GDZ ikisi üretilmeden gönderilmesin).
+    Başarılı gönderim bir işaret dosyası yazar (aynı gün ikinci gönderimi
+    engeller, "🔄 Tekrar gönder" ile bilinçli olarak aşılabilir).
+    """
+    email_mod = import_pipeline_step("09_email_report")
+    readiness = email_mod.check_readiness()
+    adm_r, gdz_r = readiness["adm"], readiness["gdz"]
+
+    # Ne ADM ne GDZ bugün çalışmadıysa panel gösterilecek bir şey yok.
+    if not adm_r["ran_today"] and not gdz_r["ran_today"]:
+        return
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if adm_r["ran_today"]:
+            st.success(f"✓ ADM hazır — teslim: {adm_r['target_date']}")
+        else:
+            st.warning("⏳ ADM bugün henüz çalıştırılmadı")
+    with col2:
+        if gdz_r["ran_today"]:
+            st.success(f"✓ GDZ hazır — teslim: {gdz_r['target_date']}")
+        else:
+            st.warning("⏳ GDZ bugün henüz çalıştırılmadı")
+
+    if adm_r["ran_today"] and gdz_r["ran_today"] and not readiness["target_match"]:
+        st.error(f"⚠ Hedef tarihler uyuşmuyor — ADM: {adm_r['target_date']}, "
+                 f"GDZ: {gdz_r['target_date']}. Gönderilemez.")
+
+    # ADM+GDZ ikisi de çalışmış ve tarihleri eşleşmiş olsa bile, email'e
+    # gidecek 5 dosyadan biri (rapor/diagnostic) üretilirken sessizce
+    # başarısız olmuş olabilir (07/08 adımları hata yutar) — bu durumda
+    # readiness["ready"] False kalır ama SEBEP burada gösterilmezse buton
+    # neden pasif anlaşılmaz. missing_files listesini açıkça göster.
+    if readiness.get("missing_files"):
+        st.error("⚠ Şu dosyalar eksik/üretilememiş, gönderilemez:\n\n"
+                  + "\n".join(f"- {f}" for f in readiness["missing_files"]))
+
+    if not readiness["ready"]:
+        st.info("⏳ Onay bekliyor — ADM ve GDZ ikisi de bugün, aynı hedef tarihle bitince aktif olur.")
+        st.button("🏢 MRC İçi Paylaş", key="internal_send_btn", disabled=True)
+        st.button("📧 Müşteriye Gönder", type="primary", key="customer_send_btn", disabled=True)
+        return
+
+    st.markdown("#### 🏢 MRC İçi Paylaş")
+    st.caption("Yalnızca emre.hangul@mrc-tr.com ve cagatay.bayrak@mrc-tr.com adreslerine gider.")
+    st.session_state.setdefault("internal_confirm_pending", False)
+    if email_mod.is_sent("internal"):
+        info = email_mod.sent_info("internal")
+        st.success(f"✓ İç paylaşım yapıldı — {info.get('sent_at', '?')}")
+        if st.button("🔄 MRC içine tekrar gönder", key="internal_resend_btn"):
+            st.session_state["internal_confirm_pending"] = True
+    elif st.button("🏢 MRC İçi Paylaş", key="internal_send_btn"):
+        st.session_state["internal_confirm_pending"] = True
+
+    _render_internal_confirmation(email_mod)
+
+    st.divider()
+    st.markdown("#### 📧 Müşteriye Gönder")
+    st.caption("Test alıcısı: " + ", ".join(email_mod.CUSTOMER_TO))
+    st.session_state.setdefault("customer_confirm_stage", 0)
+    if email_mod.is_sent("customer"):
+        info = email_mod.sent_info("customer")
+        st.success(f"✓ Müşteri gönderimi tamamlandı — {info.get('sent_at', '?')}")
+        if st.button("🔄 Müşteriye tekrar gönder", key="customer_resend_btn"):
+            st.session_state["customer_confirm_stage"] = 1
+    else:
+        st.warning("Son forecast ve diagnostic dosyalarını kontrol ederek müşteri gönderimini onaylayın.")
+        if st.button("📧 Müşteriye Gönder", type="primary", key="customer_send_btn"):
+            st.session_state["customer_confirm_stage"] = 1
+
+    _render_customer_double_confirmation(email_mod)
+
+
+def _render_internal_confirmation(email_mod):
+    """MRC ici email icin tek asamali bilincli teyit ister."""
+    if not st.session_state.get("internal_confirm_pending", False):
+        return
+    st.warning("MRC içine mail atılacak, emin misiniz?")
+    yes_col, cancel_col = st.columns(2)
+    with yes_col:
+        if st.button("Evet, MRC içine gönder", type="primary",
+                     key="internal_confirm_yes", use_container_width=True):
+            st.session_state["internal_confirm_pending"] = False
+            _do_send_email(email_mod, "internal")
+    with cancel_col:
+        if st.button("Hayır, iptal et", key="internal_confirm_no", use_container_width=True):
+            st.session_state["internal_confirm_pending"] = False
+            _safe_rerun()
+
+
+def _render_customer_double_confirmation(email_mod):
+    """Musteri email'i icin iki ayri, ard arda bilincli teyit ister."""
+    stage = st.session_state.get("customer_confirm_stage", 0)
+    if stage == 1:
+        st.warning("Müşteriye mail atılacak, emin misiniz?")
+        yes_col, cancel_col = st.columns(2)
+        with yes_col:
+            if st.button("Evet, devam et", key="customer_confirm_first_yes", use_container_width=True):
+                st.session_state["customer_confirm_stage"] = 2
+                _safe_rerun()
+        with cancel_col:
+            if st.button("Hayır, iptal et", key="customer_confirm_first_no", use_container_width=True):
+                st.session_state["customer_confirm_stage"] = 0
+                _safe_rerun()
+    elif stage == 2:
+        st.error("Emin olduğunuzu bir kez daha teyit edin.")
+        yes_col, back_col = st.columns(2)
+        with yes_col:
+            if st.button("Evet, eminim ve gönder", type="primary",
+                         key="customer_confirm_second_yes", use_container_width=True):
+                st.session_state["customer_confirm_stage"] = 0
+                _do_send_email(email_mod, "customer")
+        with back_col:
+            if st.button("Geri dön", key="customer_confirm_second_no", use_container_width=True):
+                st.session_state["customer_confirm_stage"] = 1
+                _safe_rerun()
+
+
+def _do_send_email(email_mod, audience: str):
+    """Ortak raporu üret, günlük çıktıları arşivle ve email'i gönder."""
+    with st.spinner("ADM+GDZ ortak STLF raporu hazırlanıyor ve email gönderiliyor..."):
+        try:
+            result = email_mod.run(audience=audience)
+        except Exception as e:
+            log.error(f"Email gönderim hatası\n{traceback.format_exc()}")
+            st.error(f"✗ Email gönderilemedi: {e}")
+            return
+
+    log.info(f"══ 09_email_report ({audience}, onaylı) | {result}")
+    status = result.get("status")
+    if status == "ok":
+        st.success(f"✓ Gönderildi: {', '.join(result.get('to', []))}")
+        _safe_rerun()
+    elif status == "skipped":
+        st.info(f"SMTP ayarlı değil — email atlanmış görünüyor "
+                f"({result.get('reason', '?')}). Env: STLF_SMTP_HOST/USER/PASS.")
+    else:
+        st.error(f"✗ Gönderilemedi: {result.get('error', result)}")
+
+
+def _safe_rerun():
+    """Streamlit sürümünden bağımsız güvenli rerun (yoksa sessizce geç)."""
+    fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+    if fn:
+        fn()
 
 
 def _tail_lines(path, n=15) -> str:
@@ -218,9 +372,14 @@ def _render_gdz():
         if gdz_target_date:
             args += ["--target", gdz_target_date]
 
-        proc = run_gdz_pipeline_async(args)
         stdout_path = gdz_stdout_path()
         summary_path = gdz_summary_path()
+        # Önceki denemenin özeti yeni başarısız koşuyu başarılı göstermesin.
+        try:
+            summary_path.unlink(missing_ok=True)
+        except OSError as e:
+            st.warning(f"Eski GDZ summary temizlenemedi: {e}")
+        proc = run_gdz_pipeline_async(args)
 
         with st.status("GDZ pipeline çalışıyor (subprocess, ~5-8dk — Chronos dahil)...", expanded=True) as status:
             placeholder = st.empty()
@@ -243,7 +402,8 @@ def _render_gdz():
                     summary = None
                     st.warning(f"Summary okunamadı: {e}")
 
-                if summary and summary.get("status") == "ok":
+                summary_is_gdz = summary and summary.get("edas_id") == "GDZ"
+                if summary_is_gdz and summary.get("status") == "ok":
                     status.update(label="✓ GDZ pipeline tamamlandı", state="complete")
                     for step_name, result in summary.get("steps", {}).items():
                         st.write(f"✓ **{step_name}** — {result}")
@@ -251,9 +411,14 @@ def _render_gdz():
                     if deliver and deliver.get("output_file"):
                         st.success(f"Teslim dosyası: {deliver['output_file']}")
                 else:
-                    status.update(label="⚠ GDZ pipeline durum belirsiz", state="error")
-                    st.warning(f"Summary status: {summary.get('status') if summary else '?'}")
-                    st.json(summary)
+                    status.update(label="HATA — GDZ çalışma özeti oluşmadı", state="error")
+                    st.error(
+                        "GDZ subprocess çıkış kodu 0 olsa da bu çalışmaya ait geçerli "
+                        "GDZ summary dosyası oluşmadı. Son log satırları aşağıdadır."
+                    )
+                    if summary:
+                        st.json(summary)
+                    st.code(_tail_lines(stdout_path, n=60), language="text")
 
         st.session_state["gdz_forecast_running"] = False
 
@@ -262,3 +427,11 @@ def render():
     st.subheader("Tahmin Üret")
     _render_adm()
     _render_gdz()
+    email_mod = import_pipeline_step("09_email_report")
+    readiness = email_mod.check_readiness()
+    if readiness.get("ready"):
+        forecast_adjustment.render(
+            readiness["adm"]["target_date"],
+            customer_sent=email_mod.is_sent("customer"),
+        )
+    _render_approval_panel()

@@ -132,6 +132,55 @@ def _forecast_date_range(con: duckdb.DuckDBPyConnection, edas: str) -> tuple[dat
     return date.today(), date.today()
 
 
+def _missing_forecast_dates(hourly: pd.DataFrame, start_d: date, end_d: date) -> list:
+    """Secili aralikta+ufukta HIC satiri olmayan takvim gunlerini dondur.
+    forecast_log'da bir gun icin kayit yoksa (log kaybi / pipeline atlanmasi)
+    grafik o gunu sessizce atlayip komsu gunleri birbirine baglar — bu da
+    veri kaybini 'garip bir egri' gibi gosterip UI hatasi zannettirir. Bu
+    fonksiyon o bosluklari acikca listeler."""
+    all_days = pd.date_range(start_d, end_d, freq="D").date
+    if hourly.empty:
+        return list(all_days)
+    present = set(pd.to_datetime(hourly["target_date"]).dt.date.unique())
+    return [d for d in all_days if d not in present]
+
+
+def _reindex_hourly_gaps(df: pd.DataFrame, start_d: date, end_d: date) -> pd.DataFrame:
+    """Eksik saatleri NaN satir olarak ekler ki Plotly cizgiyi (connectgaps=False
+    varsayilaniyla) kirsin, komsu gunleri duz cizgiyle birlestirmesin. Sadece
+    TEK bir ufuk seciliyken guvenli cagrilmali (target_ts o zaman tekil olur)."""
+    if df.empty:
+        return df
+    full_idx = pd.date_range(start_d, pd.Timestamp(end_d) + pd.Timedelta(hours=23), freq="h")
+    out = df.set_index("target_ts").reindex(full_idx)
+    out.index.name = "target_ts"
+    return out.reset_index()
+
+
+def _forecast_edge_date_for_horizon(con: duckdb.DuckDBPyConnection, edas: str,
+                                     horizon: list[str], agg: str, fallback: date) -> date:
+    """Secili ufuk(lar)a gore forecast_log_v MIN/MAX(target_date). T+1 ile T+2
+    farkli gunlerde baslar/biter (issue+1 vs issue+2 — bkz. issue_date farki) —
+    genel fc_min/fc_max'i (tum ufuklarin karisimi) varsayilan Baslangic/Bitis
+    olarak kullanmak, her gun sahte bir bosluk uyarisi verir (secili ufuktaki
+    ilk/son gun, digerinin dolu oldugu bir gune denk gelir). Bu yuzden
+    varsayilanlari SADECE secili ufkun kendi ucuna gore hesapliyoruz."""
+    if not horizon or not _has_table(con, "forecast_log_v"):
+        return fallback
+    try:
+        placeholders = ",".join(["?"] * len(horizon))
+        r = con.execute(
+            f"SELECT {agg}(target_date) FROM forecast_log_v "
+            f"WHERE edas_id = ? AND horizon_day IN ({placeholders})",
+            [edas, *horizon],
+        ).fetchone()
+        if r and r[0]:
+            return r[0] if isinstance(r[0], date) else pd.Timestamp(r[0]).date()
+    except Exception:
+        pass
+    return fallback
+
+
 def _available_models(edas: str) -> dict[str, str]:
     """edas'a gore mevcut model kolonlarini dondur (GDZ'de bazi kolonlar NaN)."""
     con = _connect(edas)
@@ -338,8 +387,13 @@ def render():
         model_label = st.sidebar.selectbox(
             "Model", list(available_models.keys()), index=0, key="izleme_model")
         model_col = available_models[model_label]
+        # Kullanici tercihi: iki tenant'ta da her zaman T+2, sabit/surekli.
+        horizon_default = ["T+2"]
+        if st.session_state.get("izleme_horizon_edas_seen") != edas:
+            st.session_state["izleme_horizon"] = horizon_default
+            st.session_state["izleme_horizon_edas_seen"] = edas
         horizon = st.sidebar.multiselect(
-            "Ufuk", ["T+1", "T+2"], default=["T+2"], key="izleme_horizon")
+            "Ufuk", ["T+1", "T+2"], key="izleme_horizon")
 
         # Scorecard
         scorecard = _load_scorecard(con, edas, days=day_count)
@@ -352,20 +406,62 @@ def render():
         else:
             sc_latest = fc_max
 
-        default_start = max(fc_min, sc_latest - timedelta(days=min(day_count, 14)))
-        default_end = fc_max  # forecast_log_v max — tahmin gunlerini de goster
+        # Baslangic/Bitis: secili ufkun KENDI min/max'i (bkz.
+        # _forecast_edge_date_for_horizon docstring) — genel fc_min/fc_max
+        # (tum ufuklarin karisimi) kullanilirsa sahte 'bu gun icin veri yok'
+        # uyarisi cikar (T+1/T+2 farkli gunlerde baslar/biter).
+        horizon_min = _forecast_edge_date_for_horizon(con, edas, horizon, "MIN", fc_min)
+        horizon_max = _forecast_edge_date_for_horizon(con, edas, horizon, "MAX", fc_max)
+        default_start = max(horizon_min, sc_latest - timedelta(days=min(day_count, 14)))
+        default_end = horizon_max
         min_date = fc_min
         max_date = fc_max
+
+        # DIKKAT: st.date_input `key` verildiginde `value=` SADECE ilk renderda
+        # kullanilir; sonraki rerun'larda widget kendi session_state[key]'ini
+        # okur ve `value=` sessizce yok sayilir. fc_max her gun yeni tahminle
+        # ilerledigi icin (dunku run T+2 olarak yarini, bugunku T+2 olarak
+        # yarinin-yarinini ekler) bu yuzden Bitis tarihi eski gunde donup
+        # kalir, yeni gun hic gorunmez. fc_max/ufuk (tenant+horizon bazli)
+        # degistiginde state'i widget olusmadan ONCE elle resetleyerek
+        # pencereyi ilerletiyoruz.
+        #
+        # DIKKAT 2 (bulundu 2026-07-10, ADM'i StreamlitAPIException ile
+        # cokertiyordu): key'ler ONCEDEN tenant'a gore ayri degildi
+        # ("izleme_start"/"izleme_end" HER edas icin AYNI session_state
+        # anahtariydi) — GDZ'de secilen bir tarih (ornegin fc_min=06-28),
+        # ADM'e gecince ADM'in kendi min_date'inin (06-29) ALTINDA kalip
+        # "value must lie between min/max" hatasi firlatiyordu. Key'leri
+        # tenant'a gore ayirdik + asagida DEFANSIF clamp ekledik: reset
+        # mantigi bir kombinasyonu atlarsa bile widget'a ASLA sinir-disi
+        # deger gitmez.
+        start_key = f"izleme_start__{edas}"
+        end_key = f"izleme_end__{edas}"
+        fc_seen_key = f"izleme_fc_seen__{edas}__{','.join(horizon)}"
+        fc_seen_val = (horizon_min, horizon_max)
+        if st.session_state.get(fc_seen_key) != fc_seen_val:
+            st.session_state[start_key] = default_start
+            st.session_state[end_key] = default_end
+            st.session_state[fc_seen_key] = fc_seen_val
+
+        # Defansif clamp: hangi sebeple olursa olsun (eski/paylasilan state,
+        # gozden kacan kombinasyon) session_state'te [min_date,max_date]
+        # disinda bir deger varsa widget kurulmadan ONCE ice cek — Streamlit
+        # `value` argumanini key varken yok saydigi icin bunu WIDGET
+        # OLUSMADAN ONCE session_state'i elle duzelterek yapmak zorundayiz.
+        for k, fallback in ((start_key, default_start), (end_key, default_end)):
+            cur = st.session_state.get(k, fallback)
+            st.session_state[k] = min(max(cur, min_date), max_date)
 
         col_d1, col_d2 = st.columns(2)
         with col_d1:
             start_d = st.date_input(
-                "Baslangic", value=default_start,
-                min_value=min_date, max_value=max_date, key="izleme_start")
+                "Baslangic",
+                min_value=min_date, max_value=max_date, key=start_key)
         with col_d2:
             end_d = st.date_input(
-                "Bitis", value=default_end,
-                min_value=min_date, max_value=max_date, key="izleme_end")
+                "Bitis",
+                min_value=min_date, max_value=max_date, key=end_key)
 
         if start_d > end_d:
             start_d, end_d = end_d, start_d
@@ -412,17 +508,18 @@ def render():
             last = sc.sort_values("target_date", ascending=False).iloc[0]
             last_mape = _scalar(last["mape"])
             avg_mape = _scalar(sc["mape"].mean(numeric_only=True))
+            hz_label = ", ".join(horizon) if horizon else "Tum"
             col1.metric(
-                "T+2 MAPE (son gun)",
+                f"{hz_label} MAPE (son gun)",
                 f"{last_mape:.2f}%" if last_mape is not None else "-",
                 delta=(f"{last_mape - avg_mape:+.2f}pp"
                        if last_mape is not None and avg_mape is not None else None),
             )
-            col2.metric("T+2 WAPE (son gun)",
+            col2.metric(f"{hz_label} WAPE (son gun)",
                         f"{_scalar(last['wape']):.2f}%" if _scalar(last.get("wape")) is not None else "-")
-            col3.metric("T+2 RMSE (son gun)",
+            col3.metric(f"{hz_label} RMSE (son gun)",
                         f"{_scalar(last['rmse']):.0f}" if _scalar(last.get("rmse")) is not None else "-")
-            col4.metric("T+2 ME (son gun)",
+            col4.metric(f"{hz_label} ME (son gun)",
                         f"{_scalar(last['me']):.0f}" if _scalar(last.get("me")) is not None else "-",
                         delta_color="inverse")
             col5.metric("Actual gun", n_with_actual)
@@ -451,16 +548,29 @@ def render():
 
         # Tab 1: Forecast vs Actual
         with tab_fc:
+            missing_days = _missing_forecast_dates(hourly, start_d, end_d)
+            if missing_days:
+                missing_str = ", ".join(d.isoformat() for d in missing_days)
+                st.warning(
+                    f"⚠ Bu gunler icin secili ufukta ({', '.join(horizon) if horizon else 'Tum'}) "
+                    f"forecast_log'da HIC kayit yok: {missing_str}. "
+                    "UI hatasi degil — o gunun tahmini pipeline'da hic uretilmemis/kaydedilmemis "
+                    "(log kaybi). Grafikte bu gunler bos birakilir, komsu gunlere baglanmaz."
+                )
             if not hourly.empty and model_col in hourly.columns:
                 horizon_str = ", ".join(horizon) if horizon else "Tum"
-                fig_fc = plot_forecast_vs_actual(hourly, model_col, model_label)
+                plot_df = (
+                    _reindex_hourly_gaps(hourly, start_d, end_d)
+                    if len(horizon) == 1 else hourly
+                )
+                fig_fc = plot_forecast_vs_actual(plot_df, model_col, model_label)
                 fig_fc.update_layout(
                     title=f"Tahmin vs Gerceklesen — {model_label} ({horizon_str})"
                 )
                 st.plotly_chart(fig_fc, use_container_width=True)
                 if _has_actuals(hourly):
                     st.plotly_chart(
-                        plot_residuals(hourly, model_col),
+                        plot_residuals(plot_df, model_col),
                         use_container_width=True,
                     )
                 else:

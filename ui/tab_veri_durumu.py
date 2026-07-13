@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from common import (
+from dashboard_common import (
     MASTER_PARQUET, RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL,
     import_gdz_ingest, render_freshness_card, render_pending_card, LIVE_DATA_DIR,
 )

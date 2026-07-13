@@ -1,7 +1,7 @@
 """
 tab_veri_yukleme.py — Sekme 2: Veri Yükleme
 ==============================================
-LIVE_DATA_DIR / DD.MM / subfolder yapısından otomatik tarama,
+LIVE_DATA_DIR / YYYY.MM / DD / subfolder yapısından otomatik tarama,
 önizleme, onay ve commit. Her gün ayrı ayrı veya toplu işlenebilir.
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from common import (
+from dashboard_common import (
     LIVE_DATA_DIR, MASTER_PARQUET,
     import_pipeline_step, import_gdz_ingest,
     get_pending_for_network,
