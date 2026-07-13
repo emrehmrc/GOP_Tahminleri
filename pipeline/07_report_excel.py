@@ -44,7 +44,9 @@ def lf(p):
     try:
         d = pd.read_excel(p, sheet_name="Tahmin")
         return d.set_index("Saat")["Tahmin_MWh"]
-    except: return None
+    except (ValueError, KeyError, OSError) as e:
+        print(f"     [Uyarı] {p.name} okunamadı: {e}")
+        return None
 
 def mape(p, a):
     m = (a>0)&(~np.isnan(p))&(~np.isnan(a))
@@ -227,8 +229,10 @@ def write_excel(tables, sheet_name):
     # Try to load existing
     wb = None
     if REPORT.exists():
-        try: wb = openpyxl.load_workbook(REPORT)
-        except: pass
+        try:
+            wb = openpyxl.load_workbook(REPORT)
+        except (OSError, KeyError, ValueError) as e:
+            print(f"     [Uyarı] mevcut rapor açılamadı, sıfırdan oluşturulacak: {e}")
     if wb is None: wb = openpyxl.Workbook()
     
     # Get or create sheet
@@ -316,7 +320,8 @@ def write_excel(tables, sheet_name):
                         pct = float(val.rstrip("%"))
                         cell.fill = GREEN if pct < 3 else YELLOW if pct < 6 else RED
                         cell.number_format = '0.0"%"'
-                    except: pass
+                    except ValueError:
+                        pass
     
     wb.save(REPORT)
     print(f"     Rapor: {REPORT.name}")
@@ -346,8 +351,7 @@ def run():
 
     # GDZ — ortak rapor iki sheet olmadan basarili sayilmaz.
     try:
-        gdz_path = ROOT.parent / "gdz talep" / "live"
-        sys.path.insert(0, str(gdz_path))
+        sys.path.insert(0, str(C.GDZ_LIVE_ROOT))
         import config_live_gdz
         gz = pd.read_parquet(config_live_gdz.GDZ_MASTER_PARQUET)
         gz["Tarih"] = pd.to_datetime(gz["Tarih"])

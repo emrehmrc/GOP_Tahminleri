@@ -66,6 +66,19 @@ FEATURE_MATRIX_PATH = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
 # ── Günlük veri kaynağı (OneDrive YYYY.MM/DD subfolder yapısı) ────────────────
 LIVE_DATA_DIR = LIVE_DIR.parent.parent.parent / "02_Alınan Veriler" / "gdz-adm live" / "talep"
 
+# GDZ'nin kendi kok dizini — eskiden pipeline/07_report_excel.py ve
+# pipeline/09_email_report.py'de ayri ayri hardcoded'di (Faz 1, 2026-07-13:
+# tek yere toplandi, iki dosya da artik buradan okur).
+GDZ_LIVE_ROOT = LIVE_DIR.parent / "gdz talep" / "live"
+
+# ── Ingest veri-kalite kapısı (Faz 1, 2026-07-13) ─────────────────────────────
+# 07-12 Pazar ADM incelemesinde bulundu: ingest'te sadece negatif/eksik-saat
+# kontrolü vardı, sıfır-değer ve tarihsel-outlier (robust-z) kontrolü yoktu.
+# Bkz. monitoring/data_quality.py — ihlal koşuyu DURDURMAZ, sadece işaretler
+# (logs/alerts/<date>_data_quality.json + summary.json).
+INGEST_OUTLIER_Z_THRESHOLD = 4.0
+INGEST_OUTLIER_LOOKBACK_DAYS = 30
+
 # ── Hedef kolon (Boray'dan birebir aynı) ─────────────────────────────────────
 RAW_TARGET_COL = "ADM_Dağıtılan_Enerji_(MWh)"
 RAW_DATE_COL   = "Tarih"

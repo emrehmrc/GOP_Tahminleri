@@ -120,9 +120,15 @@ def rebuild_duckdb_views(config: TenantConfig) -> dict:
             # Dedup: aynı (edas_id, target_ts, horizon_day) için birden çok run
             # birikebilir — gerçek run'ı backfill/archive_heal'e tercih et,
             # sonra en güncel issue_ts.
+            #
+            # run_count (Faz 1, 2026-07-13): kaç run bu hücreye yazmış — dedup
+            # SONUCU tek satır göründüğü için birden fazla canlı run aynı günü
+            # gölgeliyorsa (örn. aynı gün iki kez koşturulmuş) bu sessizce
+            # kaybolurdu; artık winning satırın kendisinde görünür.
             con.execute(
                 f"CREATE OR REPLACE VIEW forecast_log_v AS "
-                f"SELECT * FROM read_parquet('{fc_glob}', hive_partitioning=0, union_by_name=1) "
+                f"SELECT *, count(*) OVER (PARTITION BY edas_id, target_ts, horizon_day) AS run_count "
+                f"FROM read_parquet('{fc_glob}', hive_partitioning=0, union_by_name=1) "
                 f"QUALIFY row_number() OVER ("
                 f"  PARTITION BY edas_id, target_ts, horizon_day "
                 f"  ORDER BY (run_id LIKE '%backfill%' OR run_id LIKE '%archheal%' "

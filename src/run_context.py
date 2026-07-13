@@ -208,14 +208,20 @@ def prune_archive(keep_days: int | None = None) -> int:
     return removed
 
 
-def write_summary(ctx: dict, steps: dict, status: str) -> Path:
+def write_summary(ctx: dict, steps: dict, status: str, extra: dict | None = None) -> Path:
     """logs/<issue_date>_summary.json yaz — HEM UI HEM CLI çağırır.
-    (Bugün yalnızca run_daily yazıyor; UI yolu hiç summary üretmiyordu.)"""
+    (Bugün yalnızca run_daily yazıyor; UI yolu hiç summary üretmiyordu.)
+
+    `extra` (Faz 1, 2026-07-13): steps'in İÇİNE değil üst seviyeye eklenecek
+    alanlar — örn. forecast_logged: true/false, kullanıcının "tahminler
+    loglanmıyor" şikayetini programatik olarak (steps.forecast_log.status'a
+    inmeden) kontrol edilebilir yapmak için."""
     summary = {
         **{k: ctx.get(k) for k in ("edas_id", "run_id", "config_hash", "issue_date", "target_date", "started_at")},
         "finished_at": datetime.now().isoformat(timespec="seconds"),
         "status": status,
         "steps": steps,
+        **(extra or {}),
     }
     C.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     path = C.LOGS_DIR / f"{ctx['issue_date']}_summary.json"
@@ -223,3 +229,77 @@ def write_summary(ctx: dict, steps: dict, status: str) -> Path:
         json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
     log.info(f"Özet yazıldı → {path} (status={status})")
     return path
+
+
+# ── Faz 1 (2026-07-13): ortak run-sonu kuyruğu ────────────────────────────────
+def finalize_run(ctx: dict, steps: dict, target_date: str | None = None) -> dict:
+    """06_deliver BAŞARILI olduktan SONRA çağrılır: forecast_log yaz -> DuckDB
+    view'ları kur -> günlük yedek -> reconcile (heal+tamlık) -> daily_scorecard
+    -> alarm kontrolü. run_daily.py bunu çağırır (UI kendi kopya bloğunu
+    kullanmaya devam eder — bkz. docs/MASTER_PLAN.md Faz 1 §1).
+
+    forecast_log adımı artık HARD-FAIL: yazım/doğrulama başarısız olursa
+    exception burada yakalanır, `forecast_logged=False` döner ve run_daily.py
+    bunu görüp genel run status'unu "delivered_NOT_LOGGED" yapar — eskiden
+    (sessiz log.warning) bu, kullanıcının "tahminler loglanıyor ama kayıyor"
+    şikayetinin tam kök nedeniydi. Diğer adımlar (reconcile/scorecard/alerts)
+    kasıtlı olarak soft-fail kalır: forecast_log'un kendisi sağlamsa bunların
+    başarısızlığı teslimi/logu geçersiz kılmaz, sadece izleme zenginliğini azaltır.
+    """
+    from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip, reconcile
+    from scorecard import build_daily_scorecard, check_alerts
+
+    result = {"forecast_logged": False}
+
+    try:
+        steps["forecast_log"] = write_forecast_log(ctx)
+        rebuild_duckdb_views()
+        backup_logs_zip()
+        result["forecast_logged"] = True
+    except Exception as e:
+        log.error(f"Forecast log yazımı HATA — run 'delivered_NOT_LOGGED' olarak işaretlenecek: {e}")
+        steps["forecast_log"] = {"status": "error", "error": str(e)}
+        result["forecast_logged"] = False
+
+    try:
+        steps["reconcile"] = reconcile()
+        n_gaps = len(steps["reconcile"].get("gaps", []))
+        if n_gaps:
+            log.warning(f"[Reconcile] {n_gaps} hücre gerçek kayıp -> logs/gaps/")
+    except Exception as e:
+        log.warning(f"Reconcile (heal+tamlık) hatası (teslimi etkilemez): {e}")
+        steps["reconcile"] = {"status": "error", "error": str(e)}
+
+    try:
+        steps["scorecard"] = build_daily_scorecard()
+        alerts = check_alerts()
+        steps["alerts"] = {"count": len(alerts)}
+    except Exception as e:
+        log.warning(f"Scorecard/alarm hatası (teslimi etkilemez): {e}")
+        steps["scorecard"] = {"status": "error", "error": str(e)}
+
+    # run_count görünürlüğü (Faz 1 §4): bugünün target_date'i için birden
+    # fazla canlı run varsa (aynı gün iki kez koşturulmuş) uyar — dosyalar
+    # kaybolmaz ama İzleme'de sadece kazanan run görünür.
+    if target_date and C.MONITORING_DB.exists():
+        try:
+            import duckdb
+            con = duckdb.connect(str(C.MONITORING_DB), read_only=True)
+            try:
+                row = con.execute(
+                    "SELECT max(run_count) FROM forecast_log_v WHERE edas_id = ? AND target_date = ?",
+                    [C.EDAS_ID, target_date],
+                ).fetchone()
+            finally:
+                con.close()
+            run_count = int(row[0]) if row and row[0] is not None else None
+            steps["run_count"] = run_count
+            if run_count and run_count > 1:
+                log.warning(
+                    f"[RunCount] {target_date} için {run_count} run var — İzleme'de sadece "
+                    f"en son/gerçek run gösteriliyor, diğerleri diskte duruyor ama gizli."
+                )
+        except Exception as e:
+            log.warning(f"run_count kontrolü hatası (bilgi amaçlı, teslimi etkilemez): {e}")
+
+    return result

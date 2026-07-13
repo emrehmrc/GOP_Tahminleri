@@ -56,22 +56,29 @@ SMTP_PORT = int(os.getenv("STLF_SMTP_PORT", "587"))
 SMTP_USER = os.getenv("STLF_SMTP_USER", "cagatay.bayrak@mrc-tr.com")
 SMTP_PASS = os.getenv("STLF_SMTP_PASS")
 
+# Faz 1 (2026-07-13, kullanıcı talimatı): "SADECE MRC MAİLLERİ İLK BAŞTA, BİZ
+# SONRA KENDİMİZ MANUEL BİR BAKICAZ" — musteri adresi (aydemenerji) ic
+# dogrulama bitene kadar KAPALI. audience="customer" cagrisi bile artik
+# sadece MRC'ye gider; asagidaki satiri acmak musteriye gercek gonderim
+# icin yeterli olacak (Faz 4'te resmi karar).
 INTERNAL_TO = ["emre.hangul@mrc-tr.com", "cagatay.bayrak@mrc-tr.com"]
 CUSTOMER_TO = [
     "emre.hangul@mrc-tr.com",
     "cagatay.bayrak@mrc-tr.com",
     "dataanalyticsteam@mrc-tr.com",
-    "talep.tahmin@aydemenerji.com.tr",
+    # "talep.tahmin@aydemenerji.com.tr",  # KAPALI — ic dogrulama bitmeden acma.
 ]
 FROM = os.getenv("STLF_FROM_ADDRESS", "cagatay.bayrak@mrc-tr.com")
 
 # ── Dosya yollari ──────────────────────────────────────────────────
 from src.output_paths import dated_output_path, resolve_output_file, DELIVERY_ROOT
-from config_live import OUTPUT_FILENAME_TEMPLATE as ADM_FILENAME_TEMPLATE
+from config_live import OUTPUT_FILENAME_TEMPLATE as ADM_FILENAME_TEMPLATE, GDZ_LIVE_ROOT
 EXCEL_REPORT = DELIVERY_ROOT / "STLF_LIVE_RAPOR.xlsx"
 
-# GDZ'nin kendi kok dizini (run summary log'lari + OUTPUT_FILENAME_TEMPLATE icin).
-GDZ_LIVE_DIR = ROOT.parent / "gdz talep" / "live"
+# GDZ'nin kendi kok dizini (run summary log'lari + OUTPUT_FILENAME_TEMPLATE icin)
+# — Faz 1 (2026-07-13): config_live.GDZ_LIVE_ROOT'tan okunur (eskiden burada
+# ayrica hardcoded'di, pipeline/07_report_excel.py'de de ayrica hardcoded'di).
+GDZ_LIVE_DIR = GDZ_LIVE_ROOT
 sys.path.insert(0, str(GDZ_LIVE_DIR))
 from config_live_gdz import OUTPUT_FILENAME_TEMPLATE as GDZ_FILENAME_TEMPLATE
 

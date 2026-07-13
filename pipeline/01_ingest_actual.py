@@ -24,11 +24,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 from config_live import (
     LIVE_DATA_DIR, MASTER_PARQUET, ARCHIVE_DIR, OOF_HISTORY_PATH,
-    RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL,
+    RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL, TENANT,
+    INGEST_OUTLIER_Z_THRESHOLD, INGEST_OUTLIER_LOOKBACK_DAYS,
 )
 from src.data_scanner import find_csv_for_date, find_latest_csv
 from src.oof_feedback import update_oof_history
 from src.forecast_logger import update_actuals_log
+from monitoring.data_quality import check_and_alert as _check_data_quality
 
 
 def load_source_csv(path: Path) -> pd.DataFrame:
@@ -191,10 +193,34 @@ def run(target_date: Optional[date] = None, source_name: str = "aydem") -> dict:
     raw = load_source_csv(csv_path)
     validated = validate(raw)
 
+    # Faz 1 (2026-07-13): kalite kapısı için "önceki" master — append'ten SONRA
+    # okunursa bugünün (henüz doğrulanmamış) verisi kendi tarihsel referansına
+    # karışır, outlier kontrolü anlamsızlaşır.
+    if MASTER_PARQUET.exists():
+        master_before = pd.read_parquet(MASTER_PARQUET)
+        master_before[RAW_DATE_COL] = pd.to_datetime(master_before[RAW_DATE_COL])
+    else:
+        master_before = pd.DataFrame(columns=[RAW_DATE_COL, RAW_HOUR_COL, RAW_TARGET_COL])
+
     added_date = validated[RAW_DATE_COL].iloc[0].date()
     master = append_to_master(validated)
 
     print(f"     Tarih: {added_date}  |  Satır: {len(validated)}  |  Master toplam: {len(master)}")
+
+    # Faz 1: ingest veri-kalite kapısı — duplicate/eksik-saat/negatif/sıfır/
+    # tarihsel-outlier kontrolü. SESSİZCE geçmez ama koşuyu DURDURMAZ (bkz.
+    # monitoring/data_quality.py docstring — karar insanda).
+    dq_result = {"status": "not_run"}
+    try:
+        dq_result = _check_data_quality(
+            TENANT, validated, master_before, RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL,
+            z_threshold=INGEST_OUTLIER_Z_THRESHOLD, lookback_days=INGEST_OUTLIER_LOOKBACK_DAYS,
+        )
+        if dq_result["status"] != "ok":
+            print(f"     [DataQuality] {dq_result['status']}: {len(dq_result['issues'])} sorun — bkz. logs/alerts/")
+    except Exception as e:
+        print(f"     [DataQuality] Uyarı: kontrol çalıştırılamadı: {e}")
+        dq_result = {"status": "check_failed", "error": str(e)}
 
     # OOF feedback: dün tahmini ile bugünün actual'ını karşılaştır
     try:
@@ -218,6 +244,7 @@ def run(target_date: Optional[date] = None, source_name: str = "aydem") -> dict:
         "date": str(added_date),
         "rows_added": len(validated),
         "master_total": len(master),
+        "data_quality": dq_result,
     }
 
 

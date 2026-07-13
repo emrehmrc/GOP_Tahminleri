@@ -126,12 +126,18 @@ def write_forecast_log(ctx: dict, postproc_path: Optional[Path] = None,
     postproc_path = postproc_path or POSTPROC_PATH
     meta_path = meta_path or RAW_PREDICTIONS_META_PATH
 
+    # Faz 1 (2026-07-13): eskiden burada {"status": "no_postproc"/"no_datetime_col"}
+    # SESSİZCE dönüyordu — çağıran (run_daily.py/UI) bunu try/except'te warning'e
+    # çeviriyordu, run "teslim edildi" görünüyordu ama forecast_log HİÇ yazılmıyordu.
+    # Bu tam olarak kullanıcının "tahminler loglanmıyor, kayıyor" şikayetinin kök
+    # nedeniydi. Artık HARD-FAIL: exception yükselir, run_daily.py bunu
+    # status="delivered_NOT_LOGGED" olarak işaretler (bkz. run_context.finalize_run).
     if not postproc_path.exists():
-        return {"status": "no_postproc"}
+        raise FileNotFoundError(f"[ForecastLog] postprocessed_predictions.parquet yok: {postproc_path}")
 
     df = pd.read_parquet(postproc_path)
     if "Datetime" not in df.columns:
-        return {"status": "no_datetime_col"}
+        raise ValueError(f"[ForecastLog] 'Datetime' kolonu yok: {postproc_path}")
     df["Datetime"] = pd.to_datetime(df["Datetime"])
 
     meta = {}
@@ -197,9 +203,21 @@ def write_forecast_log(ctx: dict, postproc_path: Optional[Path] = None,
     for target_date, part in out.groupby("target_date"):
         path = _forecast_log_path(ctx["edas_id"], target_date, ctx["run_id"])
         _write_typed_parquet(part, FORECAST_LOG_SCHEMA, path)
+
+        # Verify-after-write (Faz 1): diske gerçekten yazıldı mı VE beklenen
+        # satır sayısını içeriyor mu — OneDrive/disk arızası, yarım yazım gibi
+        # sessiz kayıpları da yakalar (sadece "except'e düşmedi" yetmez).
+        if not path.exists():
+            raise RuntimeError(f"[ForecastLog] yazım başarısız (dosya yok): {path}")
+        verify = pd.read_parquet(path, columns=["target_date"])
+        if len(verify) != len(part):
+            raise RuntimeError(
+                f"[ForecastLog] yazım doğrulama hatası: beklenen {len(part)} satır, "
+                f"okunan {len(verify)} -> {path}"
+            )
         n_written += len(part)
 
-    log.info(f"[ForecastLog] {n_written} satır yazıldı -> {C.FORECAST_LOG_DIR}")
+    log.info(f"[ForecastLog] {n_written} satır yazıldı + doğrulandı -> {C.FORECAST_LOG_DIR}")
     return {"status": "ok", "rows": n_written, "target_dates": sorted(out["target_date"].unique().tolist())}
 
 

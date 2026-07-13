@@ -26,9 +26,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 sys.path.insert(0, str(ROOT / "src"))
-from run_context import start_run, archive_models, prune_archive, write_summary
-from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip, reconcile
-from scorecard import build_daily_scorecard, check_alerts
+from run_context import start_run, archive_models, prune_archive, write_summary, finalize_run
 
 # ── Loglama ───────────────────────────────────────────────────────────────────
 # Handler'ları start_run() kurar (UI ile ORTAK yol). Burada sadece logger referansı.
@@ -118,35 +116,12 @@ def main():
                             target_date=args.target)
         summary["steps"]["06_deliver"] = result06
 
-        # Faz 0: forecast_log yaz + türetilmiş DuckDB view'ları + günlük yedek.
-        try:
-            summary["steps"]["forecast_log"] = write_forecast_log(ctx)
-            rebuild_duckdb_views()
-            backup_logs_zip()
-        except Exception as e:
-            log.warning(f"Forecast log yazımı hatası (teslimi etkilemez): {e}")
-
-        # Faz 3 (monitoring refactor, 2026-07-11): heal (Faz 1, arşivden
-        # idempotent boşluk onarımı) + tamlık kontrolü tek çağrıda. Heal
-        # arşivi OLAN boşlukları sessizce doldurur; reconcile() üstüne "arşivi
-        # de yok" (gerçek kayıp) durumunu logs/gaps/<date>.json'a yazıp
-        # görünür kılar — sessiz log.warning yerine.
-        try:
-            summary["steps"]["reconcile"] = reconcile()
-            n_gaps = len(summary["steps"]["reconcile"].get("gaps", []))
-            if n_gaps:
-                log.warning(f"[Reconcile] {n_gaps} hücre gerçek kayıp -> logs/gaps/")
-        except Exception as e:
-            log.warning(f"Reconcile (heal+tamlık) hatası (teslimi etkilemez): {e}")
-
-        # Faz 1: daily_scorecard + alarm kontrolü. (Eski `log_daily_mape` kümülatif
-        # MAPE'si — teknik borç #2, roadmap §1.4 — kaldırıldı; yerini scorecard aldı.)
-        try:
-            summary["steps"]["scorecard"] = build_daily_scorecard()
-            alerts = check_alerts()
-            summary["steps"]["alerts"] = {"count": len(alerts)}
-        except Exception as e:
-            log.warning(f"Scorecard/alarm hatası (teslimi etkilemez): {e}")
+        # Faz 1 (2026-07-13): forecast_log -> DuckDB view'ları -> yedek ->
+        # reconcile (heal+tamlık) -> scorecard -> alarm, tek ortak fonksiyonda
+        # (bkz. src/run_context.py:finalize_run — eskiden burada 4 ayrı try/except
+        # bloğu vardı, forecast_log hatası sessizce log.warning'e düşüyordu).
+        finalize_result = finalize_run(ctx, summary["steps"], target_date=result06.get("target_date"))
+        summary["forecast_logged"] = finalize_result["forecast_logged"]
 
         # Adım 08 — STLF DIAGNOSTIC HTML (Chart.js gösterge paneli)
         try:
@@ -160,15 +135,27 @@ def main():
         # bekliyor" durumunda biter; email yalnizca kullanici UI'da
         # "Musteriye Gonder" butonuna basinca gonderilir
         # (bkz. ui/tab_tahmin_uret.py + pipeline/09_email_report.py).
-        summary["status"] = "awaiting_approval"
-        log.info(f"\n✓ Pipeline tamamlandı (email onay bekliyor). "
-                 f"Teslim: {result06.get('output_file', '?')}")
+        if finalize_result["forecast_logged"]:
+            summary["status"] = "awaiting_approval"
+            log.info(f"\n✓ Pipeline tamamlandı (email onay bekliyor). "
+                     f"Teslim: {result06.get('output_file', '?')}")
+        else:
+            # Faz 1 hard-fail: müşteri dosyaları diskte VAR (06 başarılı) ama
+            # forecast_log YAZILAMADI — İzleme'de bu run görünmeyecek. Teslimi
+            # geri almıyoruz (dosyalar hazır) ama durumu görünür şekilde
+            # kirletiyoruz ki kimse fark etmeden geçmesin.
+            summary["status"] = "delivered_NOT_LOGGED"
+            log.error(f"\n⚠ Pipeline teslim etti AMA forecast_log YAZILAMADI. "
+                      f"Teslim: {result06.get('output_file', '?')} — logs/{date.today()}_run.log'a bak.")
 
     except Exception:
         summary["status"] = "error"
         log.error("Pipeline HATA ile durdu.")
     finally:
-        write_summary(ctx, summary["steps"], summary.get("status", "error"))
+        write_summary(
+            ctx, summary["steps"], summary.get("status", "error"),
+            extra={"forecast_logged": summary.get("forecast_logged", False)},
+        )
 
 
 # ── Adım import yardımcısı ────────────────────────────────────────────────────
