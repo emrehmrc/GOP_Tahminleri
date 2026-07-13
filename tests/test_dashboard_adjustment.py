@@ -29,7 +29,7 @@ def test_ai_delta_is_bounded_at_150_and_low_history_is_visible():
     ]})
     assert fa.DEFAULT_MAX_AI_DELTA_MWH == 150.0
     assert list(result["Saat"]) == [17, 18]
-    assert result["Değişim (MWh)"].eq(140.0).all()
+    assert result["Değişim (MWh)"].eq(150.0).all()
     assert result.set_index("Saat").loc[18, "Güven"] == "Düşük"
 
 
@@ -39,7 +39,7 @@ def test_small_in_band_gap_still_gets_a_recommendation():
     ]})
     assert isinstance(result, pd.DataFrame)
     assert len(result) == 1
-    assert float(result.iloc[0]["Değişim (MWh)"]) == 13.65
+    assert float(result.iloc[0]["Değişim (MWh)"]) == 17.55
 
 
 def test_delta_never_exceeds_150_mwh_in_either_direction():

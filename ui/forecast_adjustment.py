@@ -124,7 +124,7 @@ def build_recommendations(
         gap = float(exp) - float(fc)
         lo, hi = r.get("lo"), r.get("hi")
         outside = bool((lo is not None and fc < lo) or (hi is not None and fc > hi))
-        delta = float(np.clip(gap * 0.35, -float(max_delta_mwh), float(max_delta_mwh)))
+        delta = float(np.clip(gap * 0.45, -float(max_delta_mwh), float(max_delta_mwh)))
         proposed = float(fc) + delta
         n = int(r.get("n") or 0)
         confidence = r.get("confidence")
