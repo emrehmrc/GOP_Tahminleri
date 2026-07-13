@@ -167,6 +167,7 @@ def merge_actual_and_forecast() -> pd.DataFrame:
     )
     combined = combined.sort_values([RAW_DATE_COL, RAW_HOUR_COL]).reset_index(drop=True)
     combined = _backfill_calendar_columns(combined)
+    combined = _normalize_dow(combined)
     combined = _fill_missing_holiday_flags(combined)
     combined = _add_weekend_features(combined)
     return combined
@@ -222,7 +223,7 @@ def _backfill_calendar_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[needs_fill, "Yıl"] = recon_dt.dt.year
     df.loc[needs_fill, "Ay"] = recon_dt.dt.month
     df.loc[needs_fill, "Gün"] = recon_dt.dt.day
-    df.loc[needs_fill, "Haftanın_Günü"] = recon_dt.dt.isocalendar()["day"].astype(int).values
+    df.loc[needs_fill, "Haftanın_Günü"] = recon_dt.dt.weekday.astype(int).values  # 0=Mon, 6=Sun
 
     _add_local_src_path()
     from src.holiday_calendar import build_holiday_calendar
@@ -249,14 +250,35 @@ def _backfill_calendar_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize_dow(df: pd.DataFrame) -> pd.DataFrame:
+    """Haftanın_Günü'nü tutarlı Python 0-6 encoding'e normalize et (0=Pzt, 6=Paz).
+
+    Master.parquet'teki Haftanın_Günü kolonu zaman içinde encoding değiştirmiş:
+      - 2018-08.2025: ISO (1-7, Pazar=7)  — orijinal CSV
+      - 09.2025-06.2026: Python (0-6, Pazar=6) — CSV encoding değişimi
+      - 07.2026+: NaN — CSV artık bu kolonu sağlamıyor
+
+    Bu fonksiyon TÜM satırları Tarih kolonundan yeniden hesaplayarak tek encoding'e
+    (Python 0-6) getirir. _backfill_calendar_columns'taki Saat=0 → 24 düzeltmesi ile
+    aynı rekonstrüksiyon mantığını kullanır.
+    """
+    if "Tarih" not in df.columns or "Haftanın_Günü" not in df.columns:
+        return df
+
+    corrected_hours = df["Saat"].replace(0, 24) if "Saat" in df.columns else 0
+    recon_dt = pd.to_datetime(df["Tarih"]).dt.normalize() + pd.to_timedelta(corrected_hours, unit="h")
+    df["Haftanın_Günü"] = recon_dt.dt.weekday.astype(int)  # 0=Monday, 6=Sunday
+    return df
+
+
 def _add_weekend_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Hafta sonu binary feature'ları ve Pazar/geçmiş işgünü oranı."""
+    """Hafta sonu binary feature'ları (Python 0-6: 5=Cmt, 6=Paz)."""
     if "Haftanın_Günü" not in df.columns:
         return df
 
-    df["Is_Weekend"]   = df["Haftanın_Günü"].isin([6, 7]).astype(np.int8)
-    df["Is_Sunday"]    = (df["Haftanın_Günü"] == 7).astype(np.int8)
-    df["Is_Saturday"]  = (df["Haftanın_Günü"] == 6).astype(np.int8)
+    df["Is_Weekend"]   = df["Haftanın_Günü"].isin([5, 6]).astype(np.int8)
+    df["Is_Sunday"]    = (df["Haftanın_Günü"] == 6).astype(np.int8)
+    df["Is_Saturday"]  = (df["Haftanın_Günü"] == 5).astype(np.int8)
 
     return df
 

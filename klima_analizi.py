@@ -370,7 +370,7 @@ def section_4_weekday_weekend(adm, gdz):
             continue
 
         df["date"] = df.index.date
-        df["is_weekend"] = df["Haftanın_Günü"].isin([6.0, 7.0]) if "Haftanın_Günü" in df.columns else df.index.dayofweek >= 5
+        df["is_weekend"] = df.index.dayofweek >= 5  # DatetimeIndex: 5=Cmt, 6=Paz
 
         hot = df[df["date"].isin(hot_days)]
         wd = hot[~hot["is_weekend"]].groupby("Saat")["load_mwh"].mean()
@@ -407,8 +407,7 @@ def section_4_weekday_weekend(adm, gdz):
 
         # Saturday vs Sunday breakdown
         hot = hot.copy()
-        if "Haftanın_Günü" in hot.columns:
-            hot["dayname"] = hot["Haftanın_Günü"].map({6.0: "Cumartesi", 7.0: "Pazar"}).fillna("Haftaici")
+        hot["dayname"] = hot.index.dayofweek.map({5: "Cumartesi", 6: "Pazar"}).fillna("Haftaici")
         results[label + "_wd_mean"] = wd.mean()
         results[label + "_we_mean"] = we.mean()
         print(f"  {label}: Hafta içi ort={wd.mean():.0f} MWh, Hafta sonu ort={we.mean():.0f} MWh, Fark={we_diff.mean():.1f} MWh")
