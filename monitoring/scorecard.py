@@ -29,6 +29,26 @@ HOUR_BLOCKS = {
     "evening": range(17, 22),
 }
 
+# forecast_log.day_type (monitoring/forecast_logger.py:_calendar_columns) 5 ham
+# değer üretir; Faz 2 2a-2 kırılımı için kullanıcının istediği 4 gruba indirilir
+# ("hafta içi/Cmt/Paz/özel gün" — MASTER_PLAN.md §2a-2).
+DAY_TYPE_GROUPS = {
+    "hafta_ici": "hafta_ici",
+    "cumartesi": "cumartesi",
+    "pazar": "pazar",
+    "hafta_ici_tatil": "ozel_gun",
+    "hafta_sonu_tatil": "ozel_gun",
+}
+
+MODEL_PRED_COLS = {
+    "xgb": "y_pred_xgb",
+    "lgbm": "y_pred_lgbm",
+    "cat": "y_pred_cat",
+    "chronos": "y_pred_chronos",
+    "ens_raw": "y_pred_ens_raw",
+    "final": "y_pred_final",
+}
+
 _MAD_CONST = 1.4826
 
 
@@ -74,6 +94,7 @@ def _joined_hourly(con: duckdb.DuckDBPyConnection, window_days: int) -> pd.DataF
     cutoff = (date.today() - pd.Timedelta(days=window_days)).isoformat()
     sql = """
         SELECT f.edas_id, f.target_date, f.horizon_day, f.target_ts, f.flag_holiday,
+               f.day_type,
                f.y_pred_xgb, f.y_pred_lgbm, f.y_pred_cat, f.y_pred_chronos,
                f.y_pred_ens_raw, f.y_pred_final, f.meta_method,
                f.wx_temp_fcst, f.wx_ghi_fcst,
@@ -296,6 +317,80 @@ def window_report(config: TenantConfig, windows: tuple[int, ...] | None = None,
         agg["alert_days"] = int(sub["alert_flag"].sum()) if "alert_flag" in sub.columns else None
         report[w] = agg
     return report
+
+
+def load_hourly_report(config: TenantConfig, window_days: int = 30,
+                        horizon: str | None = None) -> pd.DataFrame:
+    """Faz 2 2a-2: forecast_log_v/actuals_log_v'den saatlik model-karşılaştırma
+    tablosu (REGEN dosyalarına bağlı değil — canlı veriyle her gün koşulabilir).
+    `hour_block` ve `day_type_group` kolonları eklenmiş halde döner; hem
+    `model_segment_breakdown` hem de `analyze_models_30d.py`'nin diğer
+    kırılımları (günlük/saatlik/gün-tipi/en-kötü-saatler) bunun üzerine kurulur.
+    """
+    horizon = horizon or config.headline_horizon
+    if not config.monitoring_db.exists():
+        return pd.DataFrame()
+
+    con = duckdb.connect(str(config.monitoring_db), read_only=True)
+    try:
+        views = con.execute("SHOW TABLES").df()["name"].tolist()
+        if "forecast_log_v" not in views or "actuals_log_v" not in views:
+            return pd.DataFrame()
+        hourly = _joined_hourly(con, window_days)
+    finally:
+        con.close()
+
+    if hourly.empty:
+        return pd.DataFrame()
+
+    hourly = hourly[hourly["horizon_day"] == horizon].copy()
+    if hourly.empty:
+        return pd.DataFrame()
+
+    hourly["hour"] = pd.to_datetime(hourly["target_ts"]).dt.hour
+    hourly["hour_block"] = None
+    for label, hrs in HOUR_BLOCKS.items():
+        hourly.loc[hourly["hour"].isin(hrs), "hour_block"] = label
+    hourly["day_type_group"] = hourly["day_type"].map(DAY_TYPE_GROUPS).fillna("ozel_gun")
+    return hourly
+
+
+def model_segment_breakdown(config: TenantConfig, window_days: int = 30,
+                             horizon: str | None = None) -> pd.DataFrame:
+    """Her alt-model + final için saat-bloğu × gün-tipi MAPE/ME kırılımı.
+    "Hangi model hangi saat-bloğunda hangi gün tipinde sıçıyor?" sorusunun
+    tidy-long cevabı; bir üst çağıran (ör. analyze_models_30d.py) tenant
+    başına CSV/rapor üretir.
+
+    Dönen kolonlar: edas_id, horizon_day, model, hour_block, day_type_group,
+    n_hours, mape, me.
+    """
+    hourly = load_hourly_report(config, window_days, horizon)
+    if hourly.empty:
+        return pd.DataFrame()
+    horizon = horizon or config.headline_horizon
+
+    rows = []
+    for model, pred_col in MODEL_PRED_COLS.items():
+        if pred_col not in hourly.columns:
+            continue
+        for (edas_id, hour_block, day_type_group), g in hourly.groupby(
+            ["edas_id", "hour_block", "day_type_group"]
+        ):
+            pred = g[pred_col]
+            actual = g["y_actual"]
+            rows.append({
+                "edas_id": edas_id,
+                "horizon_day": horizon,
+                "model": model,
+                "hour_block": hour_block,
+                "day_type_group": day_type_group,
+                "n_hours": int(pred.notna().sum()),
+                "mape": _mape(pred, actual),
+                "me": _me(pred, actual),
+            })
+
+    return pd.DataFrame(rows)
 
 
 def check_alerts(config: TenantConfig, z_threshold: float | None = None) -> list[dict]:

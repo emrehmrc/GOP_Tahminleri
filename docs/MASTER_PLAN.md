@@ -6,7 +6,7 @@
 |-----|------|-------|
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
 | 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
-| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 başladı 2026-07-13 (2a-1 tamam) |
+| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a-1, 2a-2 tamam) |
 | 3 | Multi-tenant çekirdek | ⬜ |
 | 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ⬜ |
 | 5 | Hijyen + dokümantasyon | ⬜ |
@@ -139,9 +139,22 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    biri 12 Temmuz'un sentetik tekrarı: model düz devam ediyor, gerçek düşüyor, geçen hafta zaten o
    düşüşü gösteriyor → `beats_naive_lag168=False` doğrulanıyor). `pytest tests/` 52/52 yeşil.
    UI'ın bunu göstermesi Emre'nin kararı — veri hazır, dashboard'a dokunulmadı.
-2. **Per-model × saat-blok × gün-tipi scorecard:** `mape_{model}` kırılımı HOUR_BLOCKS × daytype
-   (hafta içi/Cmt/Paz/özel gün) bazında. `analyze_models_30d.py` REGEN dosyaları yerine
-   forecast_log + actuals_log'dan beslenir (canlı veriyle her gün koşabilir hale gelir).
+2. ✅ **Per-model × saat-blok × gün-tipi scorecard** (2026-07-13): `monitoring/scorecard.py` —
+   `load_hourly_report()` (yeni, public) forecast_log_v/actuals_log_v'yi okuyup `hour_block`
+   (HOUR_BLOCKS) + `day_type_group` (`DAY_TYPE_GROUPS`: hafta_ici/cumartesi/pazar/ozel_gun) kolonlarını
+   ekler; `model_segment_breakdown()` (yeni) bunun üzerinden 6 model (xgb/lgbm/cat/chronos/ens_raw/final)
+   × 4 saat-bloğu × 4 gün-tipi tidy-long MAPE/ME tablosunu üretir. `analyze_models_30d.py` TAMAMEN
+   yeniden yazıldı: artık `*_models_REGEN.parquet` dump'larına bağlı değil, ADM+GDZ ikisini de
+   `config_live.TENANT` / `config_live_gdz.TENANT` üzerinden canlı `monitoring.duckdb`'den okur (GDZ
+   `config_live.GDZ_LIVE_ROOT` sys.path insert deseniyle, 07/09'daki mevcut kalıp) — her gün tekrar
+   koşulabilir. Çıktı: konsol raporu + `output/analysis/model_{analysis_daily,segment_mape,worst_hours}_
+   <edas>.csv` (her tenant kendi `OUTPUT_DIR/analysis/`'ına). Gerçek canlı veriyle dry-run doğrulandı
+   (ADM+GDZ, 2026-07-01..10, 10 gün/240 saat, hatasız). 3 yeni test
+   (`tests/test_model_segment_breakdown.py`) — sentetik veri modeller arası saat-bloğu farkını
+   ayırt ettiğini doğruluyor. `pytest tests/` 55/55 yeşil.
+   **Not:** eski script'in ürettiği `output/model_analysis_report.csv` ve `output/model_hourly_mape.csv`
+   artık üretilmiyor (yeni çıktı `output/analysis/` altında farklı adlarla) — eski dosyalar orphan kaldı,
+   silme için kullanıcı onayı bekliyor (Faz 1'deki "dosya adı açık onay" dersi).
 3. **Günlük post-mortem artefaktı (backend; "Günün Karnesi"nin veri hali):** actual gelince
    `output/daily/<gün>/postmortem_<edas>.{md,json}` — dünün tahmini vs actual saatlik, per-model MAPE
    + en kötü 3 saat, naive benchmark farkı, hava tahmini hatası payı (perfect-prog ayrıştırması),
