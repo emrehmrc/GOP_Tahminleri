@@ -1,374 +1,409 @@
+"""ADM ve GDZ icin tarih eksenli ortak STLF Excel raporu.
+
+Rapor forecast olustuktan hemen sonra EDAS bazinda guncellenebilir. Gerceklesenler
+gunluk kaynak CSV'lerden, D+2 tahminler paylasilan teslim klasorundeki forecast
+Excel'lerinden okunur. Ayni tarih her uc tabloda da ayni Excel sutunundadir.
 """
-07_report_excel.py — ADM + GDZ Ortak STLF Raporu
-================================================
-Yalnizca kullanici dashboard'da "Musteriye Gonder" dediginde cagrilir.
-Forecast ve diagnostic dosyalarini uretmez; iki EDAS icin bes tabloyu yazar.
-"""
-import sys, os, re, json
-import pandas as pd, numpy as np
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from datetime import date
 from pathlib import Path
-from datetime import date, timedelta
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
+
+import numpy as np
+import pandas as pd
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
-import config_live as C
-from src.output_paths import dated_output_path, glob_output_files, resolve_output_file, DELIVERY_ROOT
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-# asof_regen.py'nin urettigi REGEN dosyalari her zaman bu sabit (tarih-onde)
-# adla yazilir — musteri teslim adlandirmasindan (ADM_forecast_.../GDZ_forecast_...)
-# BAGIMSIZDIR, degismedi (bkz. asof_regen.py).
-REGEN_FILENAME_TEMPLATE = "{date}_forecast_REGEN.xlsx"
+import config_live as C  # noqa: E402
+from src.data_scanner import find_csv_for_date, scan_available_days  # noqa: E402
+from src.output_paths import DELIVERY_ROOT, dated_output_path  # noqa: E402
 
-H = list(range(24))
-HL = [f"{h:02d}:00" for h in H]
-TODAY = date.today()
-REPORT = DELIVERY_ROOT / "STLF_LIVE_RAPOR.xlsx"
-DEFAULT_REPORT = REPORT
-GREEN = PatternFill("solid", fgColor="C6EFCE")
-YELLOW = PatternFill("solid", fgColor="FFEB9C")
-RED = PatternFill("solid", fgColor="FFC7CE")
-HDR = PatternFill("solid", fgColor="4472C4")
-HDR_F = Font(color="FFFFFF", bold=True)
-BOLD = Font(bold=True)
-THIN = Border(left=Side('thin'),right=Side('thin'),top=Side('thin'),bottom=Side('thin'))
+HOURS = tuple(range(24))
+REPORT_NAME = "STLF_LIVE_RAPOR.xlsx"
+REGIONS = {
+    "ADM": {"source_region": "aydem", "filename_token": "adm"},
+    "GDZ": {"source_region": "gediz", "filename_token": "gdz"},
+}
 
-def ga(m, tc, d):
-    day = m[m[C.RAW_DATE_COL].dt.date == d]
-    if len(day) != 24: return None
-    return day.set_index(C.RAW_HOUR_COL)[tc].sort_index()
+HEADER_FILL = PatternFill("solid", fgColor="4472C4")
+HEADER_FONT = Font(color="FFFFFF", bold=True)
+DESCRIPTION_FILL = PatternFill("solid", fgColor="D9EAF7")
+AVERAGE_FILL = PatternFill("solid", fgColor="D9EAD3")
+GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")
+YELLOW_FILL = PatternFill("solid", fgColor="FFEB9C")
+RED_FILL = PatternFill("solid", fgColor="FFC7CE")
+THIN = Border(
+    left=Side(style="thin", color="B7B7B7"),
+    right=Side(style="thin", color="B7B7B7"),
+    top=Side(style="thin", color="B7B7B7"),
+    bottom=Side(style="thin", color="B7B7B7"),
+)
 
-def lf(p):
-    if not p.exists(): return None
-    try:
-        d = pd.read_excel(p, sheet_name="Tahmin")
-        return d.set_index("Saat")["Tahmin_MWh"]
-    except (ValueError, KeyError, OSError) as e:
-        print(f"     [Uyarı] {p.name} okunamadı: {e}")
+# Kullanici tarafindan istenen sabit yerlesim. A aciklama karti, B saat,
+# C ve sonrasi tarih sutunlaridir.
+TABLES = {
+    "actual": {"header": 1, "first_hour": 2, "average": 26, "description": "A8:A10"},
+    "forecast": {"header": 27, "first_hour": 28, "average": 52, "description": "A28:A30"},
+    "deviation": {"header": 55, "first_hour": 56, "average": 80, "description": "A54:A56"},
+}
+DESCRIPTIONS = {
+    "actual": (
+        "1. GERÇEKLEŞEN (MWh)\n\nGünlük kaynak CSV'lerde bulunan saatlik "
+        "gerçekleşen enerji değerleridir. Klasör tarihi veri tarihinden bir gün sonradır."
+    ),
+    "forecast": (
+        "2. D+2 TAHMİN (MWh)\n\nPaylaşılan Çıktılar klasöründe saklanan, ilgili "
+        "teslim gününe ait saatlik tahmin değerleridir."
+    ),
+    "deviation": (
+        "3. MUTLAK SAPMA\n\nGerçekleşen ile D+2 tahmini arasındaki saatlik mutlak "
+        "orandır: ABS(Gerçekleşen / Tahmin - 1)."
+    ),
+}
+
+
+def _as_number(value) -> float | None:
+    if pd.isna(value):
         return None
+    if isinstance(value, str):
+        value = value.strip().replace(" ", "").replace(",", ".")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
 
-def mape(p, a):
-    m = (a>0)&(~np.isnan(p))&(~np.isnan(a))
-    return float(np.mean(np.abs((a[m]-p[m])/a[m])*100)) if m.sum() else None
 
-def me(p, a):
-    m = (~np.isnan(p))&(~np.isnan(a))
-    return float(np.mean(p[m]-a[m])) if m.sum() else None
+def _series_from_hour_values(hours, values) -> pd.Series | None:
+    frame = pd.DataFrame({"hour": hours, "value": values})
+    frame["hour"] = pd.to_numeric(frame["hour"], errors="coerce")
+    frame["value"] = frame["value"].map(_as_number)
+    frame = frame.dropna(subset=["hour", "value"])
+    frame["hour"] = frame["hour"].astype(int)
+    frame = frame[frame["hour"].isin(HOURS)].drop_duplicates("hour", keep="last")
+    if set(frame["hour"]) != set(HOURS):
+        return None
+    return frame.set_index("hour")["value"].sort_index().astype(float)
 
-def make_report(master, tc, fc_dir, sheet_name, filename_template, regen_dir=None):
-    """Return 5 DataFrames for the 5 tables.
 
-    fc_dir: canli/musteri teslim forecast'lerinin arandigi kok (DELIVERY_ROOT).
-    filename_template: EDAS'a ozgu teslim dosyasi adi (config_live*.OUTPUT_FILENAME_TEMPLATE).
-    regen_dir: asof_regen.py'nin urettigi *_REGEN.xlsx dosyalarinin arandigi
-               kok — bu dosyalar musteriye gitmiyor, yerel output/'ta kaliyor.
-               None ise fc_dir ile ayni (geriye uyum).
-    """
-    now = TODAY
-    ft2 = now + timedelta(days=2); ft1 = now + timedelta(days=1)
-    regen_dir = regen_dir if regen_dir is not None else fc_dir
+def read_actual_csv(path: Path, expected_date: date | None = None) -> tuple[date, pd.Series]:
+    """Gunluk gerceklesen CSV'sini tarih ve 24 saatlik seri olarak oku."""
+    frame = pd.read_csv(path, sep=";", dtype=str, encoding="utf-8-sig")
+    date_col = next((col for col in frame.columns if str(col).strip().lower().startswith("starts")), None)
+    value_col = next((col for col in frame.columns if "energy" in str(col).strip().lower()), None)
+    if not date_col or not value_col:
+        raise ValueError(f"Gerceklesen CSV semasi gecersiz: {path}")
+    # Kaynak servis bazı günlerde `04.07.2026`, bazı günlerde
+    # `4,07,2026` yazabiliyor. Tarih ayıracını normalize ederek ikisini de oku.
+    normalized_timestamps = frame[date_col].astype(str).str.strip().str.replace(",", ".", regex=False)
+    timestamps = pd.to_datetime(normalized_timestamps, format="%d.%m.%Y %H:%M", errors="coerce")
+    valid_dates = timestamps.dropna().dt.date.unique().tolist()
+    if len(valid_dates) != 1:
+        raise ValueError(f"CSV tek veri gunu icermiyor: {path}")
+    data_date = valid_dates[0]
+    if expected_date is not None and data_date != expected_date:
+        raise ValueError(f"CSV tarihi {data_date}, beklenen {expected_date}: {path}")
+    series = _series_from_hour_values(timestamps.dt.hour, frame[value_col])
+    if series is None:
+        raise ValueError(f"CSV 0..23 saatlerini tam icermiyor: {path}")
+    return data_date, series
 
-    def forecast_path(d, regen=False):
-        if regen:
-            return resolve_output_file(regen_dir, REGEN_FILENAME_TEMPLATE.format(date=d))
-        return resolve_output_file(fc_dir, filename_template.format(date=d))
 
-    actual_cache = {}
-    forecast_cache = {}
-
-    def actual(d):
-        if d not in actual_cache:
-            actual_cache[d] = ga(master, tc, d)
-        return actual_cache[d]
-
-    def forecast(d, regen=False):
-        key = (d, regen)
-        if key not in forecast_cache:
-            forecast_cache[key] = lf(forecast_path(d, regen=regen))
-        return forecast_cache[key]
-
-    # Diskte biriken forecast gunleri raporda saga dogru kalici olarak buyur.
-    # fc_dir ADM+GDZ ortak (DELIVERY_ROOT); filename_template EDAS'a ozgu literal
-    # onek tasidigi icin ("ADM_forecast_"/"GDZ_forecast_") glob asla karismaz.
-    date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
-    forecast_dates = []
-    for p in glob_output_files(fc_dir, filename_template.format(date="*")):
-        m = date_re.search(p.name)
-        if m:
-            try: forecast_dates.append(date.fromisoformat(m.group(1)))
-            except ValueError: pass
-    realized = [d for d in forecast_dates if d <= now and actual(d) is not None]
-    dates = sorted(set(realized + forecast_dates + [ft1, ft2]))
-    fc0 = forecast(TODAY)
-    ds = [str(d) for d in dates]
-    
-    def vcol(cols, rows):
-        """rows: list of (hour, [values per date]), cols: [date strings]"""
-        out = [["Saat"] + cols + ["ORT"]]
-        vals_all = {c: [] for c in cols}
-        for h, vals in rows:
-            row = [HL[h]]
-            nv = []
-            for c, v in zip(cols, vals):
-                row.append(v if v else "")
-                if v: nv.append(v)
-            for c, v in zip(cols, vals):
-                if v: vals_all[c].append(v)
-            row.append(f"{np.nanmean([x for x in vals if x]):.0f}" if any(x for x in vals if x) else "")
-            out.append(row)
-        # avg row
-        avg = ["ORTALAMA"]
-        for c in cols:
-            v = vals_all.get(c, [])
-            avg.append(f"{np.nanmean(v):.0f}" if v else "")
-        # total avg
-        all_v = [x for lst in vals_all.values() for x in lst]
-        avg.append(f"{np.nanmean(all_v):.0f}" if all_v else "")
-        out.append(avg)
-        return out
-    
-    # T1: Realized
-    t1_rows = []
-    for h in H:
-        vals = []
-        for d in dates:
-            if d > now: vals.append(None); continue
-            s = actual(d)
-            vals.append(s[h] if s is not None and h in s.index and not np.isnan(s[h]) else None)
-        t1_rows.append((h, vals))
-    t1 = vcol(ds, t1_rows)
-    
-    # T2: D+1 Forecast
-    t2_rows = []
-    for h in H:
-        vals = []
-        for d in dates:
-            fc = forecast(d)
-            if fc0 is not None and d == ft1: v = fc0.get(h, None)
-            elif fc is not None: v = fc.get(h, None)
-            else: v = None
-            vals.append(v)
-        t2_rows.append((h, vals))
-    t2 = vcol(ds, t2_rows)
-    
-    # T3: D+1 Deviation %
-    t3_rows = []
-    for h in H:
-        vals = []
-        for d in dates:
-            if d > now: vals.append(None); continue
-            s = actual(d)
-            fc = forecast(d)
-            if fc is not None and s is not None and h in fc.index and h in s.index and s[h] > 0:
-                vals.append(round(abs(s[h]-fc[h])/s[h]*100, 1))
-            else: vals.append(None)
-        t3_rows.append((h, vals))
-    t3 = vcol(ds, t3_rows)
-    # MAPE/ME rows for T3
-    mp_row = ["MAPE%"]; me_row = ["ME_MWh"]
-    for d in dates:
-        if d > now: mp_row.append(""); me_row.append(""); continue
-        s = actual(d); fc = forecast(d)
-        if fc is not None and s is not None:
-            fv = np.array([fc.get(h,np.nan) for h in H]); av = np.array([s.get(h,np.nan) for h in H])
-            mp_row.append(f"{mape(fv,av):.2f}" if mape(fv,av) is not None else "")
-            me_row.append(f"{me(fv,av):.1f}" if me(fv,av) is not None else "")
-        else: mp_row.append(""); me_row.append("")
-    mp_row.append(""); me_row.append("")
-    t3.append(mp_row); t3.append(me_row)
-    
-    # T4: D+2 Forecast
-    t4_rows = []
-    for h in H:
-        vals = []
-        for d in dates:
-            fc = forecast(d, regen=True)
-            if fc is None: fc = forecast(d)
-            if fc is not None: v = fc.get(h, None)
-            elif fc0 is not None and d == ft2: v = fc0.get(h, None)
-            else: v = None
-            vals.append(v)
-        t4_rows.append((h, vals))
-    t4 = vcol(ds, t4_rows)
-    
-    # T5: D+2 Deviation %
-    t5_rows = []
-    for h in H:
-        vals = []
-        for d in dates:
-            if d > now: vals.append(None); continue
-            s = actual(d)
-            fc = forecast(d, regen=True)
-            if fc is None: fc = forecast(d)
-            if fc is not None and s is not None and h in fc.index and h in s.index and s[h] > 0:
-                vals.append(round(abs(s[h]-fc[h])/s[h]*100, 1))
-            else: vals.append(None)
-        t5_rows.append((h, vals))
-    t5 = vcol(ds, t5_rows)
-    # MAPE/ME
-    mp_row2 = ["MAPE%"]; me_row2 = ["ME_MWh"]
-    for d in dates:
-        if d > now: mp_row2.append(""); me_row2.append(""); continue
-        s = actual(d)
-        fc = forecast(d, regen=True)
-        if fc is None: fc = forecast(d)
-        if fc is not None and s is not None:
-            fv = np.array([fc.get(h,np.nan) for h in H]); av = np.array([s.get(h,np.nan) for h in H])
-            mp_row2.append(f"{mape(fv,av):.2f}" if mape(fv,av) is not None else "")
-            me_row2.append(f"{me(fv,av):.1f}" if me(fv,av) is not None else "")
-        else: mp_row2.append(""); me_row2.append("")
-    mp_row2.append(""); me_row2.append("")
-    t5.append(mp_row2); t5.append(me_row2)
-    
-    return {"T1": t1, "T2": t2, "T3": t3, "T4": t4, "T5": t5}
-
-def write_excel(tables, sheet_name):
-    """Bes tabloyu sabit bloklarda, gunleri sutunlarda yazar."""
-    import openpyxl
-    # Try to load existing
-    wb = None
-    if REPORT.exists():
+def collect_actuals(input_root: Path, region: str, through: date) -> dict[date, pd.Series]:
+    actuals: dict[date, pd.Series] = {}
+    for data_date in scan_available_days(Path(input_root), region=region):
+        if data_date > through:
+            continue
+        path = find_csv_for_date(Path(input_root), data_date, region=region)
+        if path is None:
+            continue
         try:
-            wb = openpyxl.load_workbook(REPORT)
-        except (OSError, KeyError, ValueError) as e:
-            print(f"     [Uyarı] mevcut rapor açılamadı, sıfırdan oluşturulacak: {e}")
-    if wb is None: wb = openpyxl.Workbook()
-    
-    # Get or create sheet
-    if sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-    else:
-        ws = wb.create_sheet(sheet_name)
-    if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
-        default_ws = wb["Sheet"]
-        if default_ws.max_row == 1 and default_ws.max_column == 1 and default_ws["A1"].value is None:
-            wb.remove(default_ws)
-    
-    # Baslik + 24 saat + ortalama (+ sapma tablolarinda MAPE/ME) icin
-    # bloklar cakismayacak sekilde bosluklu tutulur.
-    r0 = {"T1": 1, "T2": 31, "T3": 61, "T4": 95, "T5": 125}
-    titles = {
-        "T1": "1. Gerçekleşen (MWh)",
-        "T2": "2. D+1 Tahmin (MWh)",
-        "T3": "3. D+1 Tahmin / Gerçekleşen Sapma (%)",
-        "T4": "4. D+2 Tahmin (MWh)",
-        "T5": "5. D+2 Tahmin / Gerçekleşen Sapma (%)",
-    }
-    descriptions = {
-        "T1": (
-            "GERÇEKLEŞEN\n\nİlgili tarihte ölçülen saatlik dağıtılan enerji "
-            "miktarını MWh cinsinden gösterir. Her tarih ayrı bir sütundur."
-        ),
-        "T2": (
-            "D+1 TAHMİN\n\nHedef günden bir gün önce üretilen saatlik talep "
-            "tahminlerini gösterir. Değerler MWh cinsindendir."
-        ),
-        "T3": (
-            "D+1 SAPMA\n\nD+1 tahmini ile gerçekleşen değer arasındaki mutlak "
-            "yüzdesel sapmayı saat bazında gösterir. Alt satırlarda günlük MAPE "
-            "ve ortalama hata (ME) bulunur."
-        ),
-        "T4": (
-            "D+2 TAHMİN\n\nHedef günden iki gün önce üretilen saatlik talep "
-            "tahminlerini gösterir. Değerler MWh cinsindendir."
-        ),
-        "T5": (
-            "D+2 SAPMA\n\nD+2 tahmini ile gerçekleşen değer arasındaki mutlak "
-            "yüzdesel sapmayı saat bazında gösterir. Alt satırlarda günlük MAPE "
-            "ve ortalama hata (ME) bulunur."
-        ),
-    }
+            parsed_date, series = read_actual_csv(path, expected_date=data_date)
+            actuals[parsed_date] = series
+        except (OSError, ValueError, UnicodeError) as exc:
+            print(f"     [Uyari] Gerceklesen okunamadi: {path.name}: {exc}")
+    return dict(sorted(actuals.items()))
 
-    # Sheet her onayda mevcut tum forecast gunlerinden deterministik yenilenir.
-    for merged_range in list(ws.merged_cells.ranges):
-        ws.unmerge_cells(str(merged_range))
+
+def _forecast_candidates(delivery_root: Path, edas: str) -> list[Path]:
+    token = REGIONS[edas]["filename_token"]
+    candidates = []
+    for path in Path(delivery_root).rglob("*.xlsx"):
+        name = path.name.lower()
+        if "forecast" in name and token in name and "regen" not in name:
+            candidates.append(path)
+    return sorted(candidates, key=lambda p: (p.stat().st_mtime_ns, str(p)))
+
+
+def read_forecast_excel(path: Path) -> tuple[date, pd.Series]:
+    """Eski/yeni adlandirmadan bagimsiz olarak forecast Excel'ini oku."""
+    try:
+        frame = pd.read_excel(path, sheet_name="Tahmin")
+    except ValueError:
+        frame = pd.read_excel(path)
+    frame.columns = [str(col).strip() for col in frame.columns]
+    required = {"Saat", "Tahmin_MWh"}
+    if not required.issubset(frame.columns):
+        raise ValueError(f"Forecast semasi gecersiz: eksik={sorted(required - set(frame.columns))}")
+
+    target_date = None
+    if "Tarih" in frame.columns:
+        dates = pd.to_datetime(frame["Tarih"], errors="coerce").dropna().dt.date.unique().tolist()
+        if dates:
+            target_date = dates[0]
+    if target_date is None:
+        match = re.search(r"20\d{2}-\d{2}-\d{2}", path.name)
+        if match:
+            target_date = date.fromisoformat(match.group(0))
+    if target_date is None:
+        raise ValueError("Forecast hedef tarihi bulunamadi")
+
+    series = _series_from_hour_values(frame["Saat"], frame["Tahmin_MWh"])
+    if series is None:
+        raise ValueError("Forecast 0..23 saatlerini tam icermiyor")
+    return target_date, series
+
+
+def collect_forecasts(delivery_root: Path, edas: str, through: date) -> dict[date, pd.Series]:
+    """Ayni hedef gun birden cok kez varsa son kaydedilen dosyayi kullan."""
+    forecasts: dict[date, pd.Series] = {}
+    for path in _forecast_candidates(delivery_root, edas):
+        try:
+            target_date, series = read_forecast_excel(path)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"     [Uyari] Forecast okunamadi: {path.name}: {exc}")
+            continue
+        if target_date <= through:
+            forecasts[target_date] = series
+    return dict(sorted(forecasts.items()))
+
+
+def build_report_data(
+    input_root: Path,
+    delivery_root: Path,
+    edas: str,
+    target_date: date,
+) -> dict:
+    edas = edas.upper()
+    if edas not in REGIONS:
+        raise ValueError(f"Bilinmeyen EDAS: {edas}")
+    actuals = collect_actuals(input_root, REGIONS[edas]["source_region"], target_date)
+    forecasts = collect_forecasts(delivery_root, edas, target_date)
+    dates = sorted(set(actuals) | set(forecasts))
+    if not dates:
+        raise FileNotFoundError(f"{edas} icin rapor verisi bulunamadi")
+    return {"edas": edas, "target_date": target_date, "dates": dates,
+            "actuals": actuals, "forecasts": forecasts}
+
+
+def _clear_sheet(ws) -> None:
+    for merged in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged))
     if ws.max_row:
         ws.delete_rows(1, ws.max_row)
+    if ws.max_column:
+        ws.delete_cols(1, ws.max_column)
 
-    ws.column_dimensions["A"].width = 16
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 3
-    table_start_col = 5  # E; A:C aciklama, D gorsel bosluk
-    
-    for tid, rows in tables.items():
-        start_row = r0[tid]
-        end_row = start_row + len(rows)
 
-        # Aciklama tek bir Excel hucresidir; A:C ve tum tablo yuksekligi
-        # birlestirilerek okunabilir bir bilgi karti gibi gosterilir.
-        ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=3)
-        explanation = ws.cell(row=start_row, column=1, value=descriptions[tid])
-        explanation.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        explanation.font = Font(bold=True, color="1F1F1F", size=11)
-        explanation.fill = PatternFill("solid", fgColor="D9EAF7")
-        explanation.border = THIN
+def _value_for(data: dict, table: str, day: date, hour: int) -> float | None:
+    actual = data["actuals"].get(day)
+    forecast = data["forecasts"].get(day)
+    if table == "actual":
+        return None if actual is None else float(actual.get(hour, np.nan))
+    if table == "forecast":
+        return None if forecast is None else float(forecast.get(hour, np.nan))
+    if actual is None or forecast is None:
+        return None
+    actual_value = _as_number(actual.get(hour))
+    forecast_value = _as_number(forecast.get(hour))
+    if actual_value is None or forecast_value in (None, 0):
+        return None
+    return abs(actual_value / forecast_value - 1.0)
 
-        title = ws.cell(row=start_row, column=table_start_col, value=titles[tid])
-        title.font = BOLD
-        
-        for ri, row in enumerate(rows):
-            for ci, val in enumerate(row):
-                cell = ws.cell(row=start_row + ri + 1, column=table_start_col + ci)
-                cell.value = val
+
+def _style_description(ws, cell_range: str, text: str) -> None:
+    ws.merge_cells(cell_range)
+    cell = ws[cell_range.split(":", 1)[0]]
+    cell.value = text
+    cell.fill = DESCRIPTION_FILL
+    cell.font = Font(bold=True, color="1F1F1F", size=10)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell.border = THIN
+    for row in ws[cell_range]:
+        for ranged_cell in row:
+            ranged_cell.border = THIN
+
+
+def write_sheet(ws, data: dict) -> None:
+    _clear_sheet(ws)
+    dates = data["dates"]
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "C2"
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 12
+    for col in range(3, 3 + len(dates)):
+        ws.column_dimensions[get_column_letter(col)].width = 14
+
+    for table_name, layout in TABLES.items():
+        header_row = layout["header"]
+        first_hour_row = layout["first_hour"]
+        average_row = layout["average"]
+        _style_description(ws, layout["description"], DESCRIPTIONS[table_name])
+
+        hour_header = ws.cell(header_row, 2, "Saat")
+        hour_header.fill = HEADER_FILL
+        hour_header.font = HEADER_FONT
+        hour_header.alignment = Alignment(horizontal="center")
+        hour_header.border = THIN
+        for offset, day in enumerate(dates, start=3):
+            cell = ws.cell(header_row, offset, day)
+            cell.number_format = "dd.mm.yyyy"
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = THIN
+
+        column_values: dict[int, list[float]] = {col: [] for col in range(3, 3 + len(dates))}
+        for hour in HOURS:
+            row = first_hour_row + hour
+            label = ws.cell(row, 2, f"{hour:02d}:00")
+            label.font = Font(bold=True)
+            label.alignment = Alignment(horizontal="center")
+            label.border = THIN
+            for col, day in enumerate(dates, start=3):
+                value = _value_for(data, table_name, day, hour)
+                cell = ws.cell(row, col)
                 cell.border = THIN
-                if ri == 0:
-                    cell.fill = HDR; cell.font = HDR_F
-                elif val and isinstance(val, str) and val.endswith("%"):
-                    try:
-                        pct = float(val.rstrip("%"))
-                        cell.fill = GREEN if pct < 3 else YELLOW if pct < 6 else RED
-                        cell.number_format = '0.0"%"'
-                    except ValueError:
-                        pass
-    
-    wb.save(REPORT)
-    print(f"     Rapor: {REPORT.name}")
+                cell.alignment = Alignment(horizontal="right")
+                if value is None or not np.isfinite(value):
+                    continue
+                cell.value = float(value)
+                column_values[col].append(float(value))
+                if table_name == "deviation":
+                    cell.number_format = "0.00%"
+                    cell.fill = GREEN_FILL if value < 0.03 else YELLOW_FILL if value < 0.06 else RED_FILL
+                else:
+                    cell.number_format = "#,##0.00"
+
+        avg_label = ws.cell(average_row, 2, "ORTALAMA")
+        avg_label.font = Font(bold=True)
+        avg_label.fill = AVERAGE_FILL
+        avg_label.border = THIN
+        avg_label.alignment = Alignment(horizontal="center")
+        for col in range(3, 3 + len(dates)):
+            cell = ws.cell(average_row, col)
+            values = column_values[col]
+            cell.value = float(np.mean(values)) if values else None
+            cell.number_format = "0.00%" if table_name == "deviation" else "#,##0.00"
+            cell.font = Font(bold=True)
+            cell.fill = AVERAGE_FILL
+            cell.border = THIN
+
+    ws.auto_filter.ref = f"B1:{get_column_letter(2 + len(dates))}26"
+    ws.print_title_rows = "1:1"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
 
 
-def run():
-    global REPORT
-    print("\n[07] ADM + GDZ ORTAK STLF RAPORU...")
-    date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
-    adm_forecasts = glob_output_files(DELIVERY_ROOT, C.OUTPUT_FILENAME_TEMPLATE.format(date="*"))
-    dated = []
-    for p in adm_forecasts:
-        if "_REGEN" in p.name:
+def update_workbook(report_path: Path, sheet_data: dict[str, dict]) -> Path:
+    report_path = Path(report_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    if report_path.exists():
+        wb = load_workbook(report_path)
+    else:
+        wb = Workbook()
+
+    for edas in ("ADM", "GDZ"):
+        if edas not in sheet_data:
             continue
-        m = date_re.search(p.name)
-        if m:
-            dated.append((date.fromisoformat(m.group(1)), p))
-    if REPORT == DEFAULT_REPORT and dated:
-        target = str(max(d for d, _ in dated))
-        REPORT = dated_output_path(DELIVERY_ROOT, target, "STLF_LIVE_RAPOR.xlsx", create=True)
-    master = pd.read_parquet(C.MASTER_PARQUET)
-    master[C.RAW_DATE_COL] = pd.to_datetime(master[C.RAW_DATE_COL])
+        if edas in wb.sheetnames:
+            ws = wb[edas]
+        else:
+            ws = wb.create_sheet(edas)
+        write_sheet(ws, sheet_data[edas])
 
-    tables = make_report(master, C.RAW_TARGET_COL, DELIVERY_ROOT, "ADM",
-                          filename_template=C.OUTPUT_FILENAME_TEMPLATE, regen_dir=C.OUTPUT_DIR)
-    write_excel(tables, "ADM")
+    if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
+        default = wb["Sheet"]
+        if default.max_row == 1 and default.max_column == 1 and default["A1"].value is None:
+            wb.remove(default)
+    ordered = [wb[name] for name in ("ADM", "GDZ") if name in wb.sheetnames]
+    ordered.extend(ws for ws in wb.worksheets if ws.title not in {"ADM", "GDZ"})
+    wb._sheets = ordered
 
-    # GDZ — ortak rapor iki sheet olmadan basarili sayilmaz.
+    tmp = report_path.with_name(f"{report_path.stem}.tmp.xlsx")
     try:
-        sys.path.insert(0, str(C.GDZ_LIVE_ROOT))
-        import config_live_gdz
-        gz = pd.read_parquet(config_live_gdz.GDZ_MASTER_PARQUET)
-        gz["Tarih"] = pd.to_datetime(gz["Tarih"])
-        gz[C.RAW_HOUR_COL] = gz["Tarih"].dt.hour
-        gz = gz.rename(columns={"Tarih": C.RAW_DATE_COL,
-                                config_live_gdz.GDZ_RAW_TARGET_COL: "Enerji"})
-        gz_tables = make_report(
-            gz, "Enerji", DELIVERY_ROOT, "GDZ",
-            filename_template=config_live_gdz.OUTPUT_FILENAME_TEMPLATE,
-            regen_dir=config_live_gdz.OUTPUT_DIR,
-        )
-        write_excel(gz_tables, "GDZ")
-        print("     [GDZ] eklendi")
-    except Exception as e:
-        raise RuntimeError(f"GDZ rapor sheet'i olusturulamadi: {e}") from e
+        wb.save(tmp)
+        wb.close()
+        os.replace(tmp, report_path)
+    except Exception:
+        wb.close()
+        tmp.unlink(missing_ok=True)
+        raise
+    return report_path
 
-    return {"status": "ok", "file": str(REPORT)}
+
+def _latest_forecast_date(edas: str | None = None) -> date:
+    edases = [edas.upper()] if edas else ["ADM", "GDZ"]
+    latest = []
+    for name in edases:
+        for path in _forecast_candidates(DELIVERY_ROOT, name):
+            try:
+                target, _ = read_forecast_excel(path)
+                latest.append(target)
+            except (OSError, ValueError, KeyError):
+                continue
+    if not latest:
+        raise FileNotFoundError("Teslim klasorunde forecast Excel'i bulunamadi")
+    return max(latest)
+
+
+def run(target_date: str | date | None = None, edas: str | None = None) -> dict:
+    """Hedef raporda bir EDAS'i veya mevcut iki EDAS'i deterministik yenile."""
+    target = (
+        date.fromisoformat(target_date) if isinstance(target_date, str)
+        else target_date if isinstance(target_date, date)
+        else _latest_forecast_date(edas)
+    )
+    requested = [edas.upper()] if edas else ["ADM", "GDZ"]
+    invalid = set(requested) - set(REGIONS)
+    if invalid:
+        raise ValueError(f"Bilinmeyen EDAS: {sorted(invalid)}")
+
+    sheet_data = {}
+    skipped = {}
+    for name in requested:
+        data = build_report_data(C.LIVE_DATA_DIR, DELIVERY_ROOT, name, target)
+        if target not in data["forecasts"]:
+            skipped[name] = f"{target} tarihli forecast yok"
+            continue
+        sheet_data[name] = data
+    if not sheet_data:
+        raise FileNotFoundError(f"{target} icin guncellenecek forecast bulunamadi: {skipped}")
+
+    report = dated_output_path(DELIVERY_ROOT, str(target), REPORT_NAME, create=True)
+    update_workbook(report, sheet_data)
+    print(f"     Rapor guncellendi: {report}")
+    return {"status": "ok", "file": str(report), "target_date": str(target),
+            "sheets_updated": list(sheet_data), "skipped": skipped}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="STLF LIVE ortak Excel raporunu guncelle")
+    parser.add_argument("--target", default=None, help="Hedef tarih YYYY-MM-DD")
+    parser.add_argument("--edas", choices=("ADM", "GDZ"), default=None)
+    args = parser.parse_args()
+    print(run(target_date=args.target, edas=args.edas))
+
 
 if __name__ == "__main__":
-    print(run())
+    main()

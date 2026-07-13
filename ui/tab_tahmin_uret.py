@@ -109,6 +109,20 @@ def _render_adm():
 
                     # 06 başarılı → forecast_log yaz + DuckDB view + günlük yedek + scorecard/alarm.
                     if step_name == "06_deliver":
+                        # Ortak STLF raporu e-posta onayini beklemez. ADM tahmini
+                        # olusur olusmaz ADM sheet'i yazilir; GDZ kendi pipeline'i
+                        # bittiginde ayni dosyanin ikinci sheet'ini gunceller.
+                        try:
+                            report_result = import_pipeline_step("07_report_excel").run(
+                                target_date=result.get("target_date"), edas="ADM",
+                            )
+                            st.session_state["forecast_steps"]["07_report"] = report_result
+                            st.write(f"✓ **STLF LIVE raporu** — {report_result.get('file', '?')}")
+                            log.info(f"══ 07_report_excel TAMAM | {report_result}")
+                        except Exception as report_err:
+                            log.warning(f"STLF raporu guncellenemedi (teslimi etkilemez): {report_err}")
+                            st.warning(f"⚠ STLF LIVE raporu güncellenemedi: {report_err}")
+
                         try:
                             st.session_state["forecast_steps"]["forecast_log"] = write_forecast_log(ctx)
                             rebuild_duckdb_views()
@@ -307,8 +321,8 @@ def _render_customer_double_confirmation(email_mod):
 
 
 def _do_send_email(email_mod, audience: str):
-    """Ortak raporu üret, günlük çıktıları arşivle ve email'i gönder."""
-    with st.spinner("ADM+GDZ ortak STLF raporu hazırlanıyor ve email gönderiliyor..."):
+    """Forecast sirasinda hazirlanan gunluk ciktilari email ile gonder."""
+    with st.spinner("Hazır ADM+GDZ tahmin dosyaları email ile gönderiliyor..."):
         try:
             result = email_mod.run(audience=audience)
         except Exception as e:

@@ -33,7 +33,7 @@ export_hourly_mape_7d.py) hala yerel output/'ta kaliyor, degismedi.
 
 SMTP ayarlari MRC mail sunucusuna gore yapilandirilmalidir (env: STLF_SMTP_*).
 """
-import sys, smtplib, os, json, importlib.util
+import sys, smtplib, os, json
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -72,7 +72,9 @@ FROM = os.getenv("STLF_FROM_ADDRESS", "cagatay.bayrak@mrc-tr.com")
 
 # ── Dosya yollari ──────────────────────────────────────────────────
 from src.output_paths import dated_output_path, resolve_output_file, DELIVERY_ROOT
-from config_live import OUTPUT_FILENAME_TEMPLATE as ADM_FILENAME_TEMPLATE, GDZ_LIVE_ROOT
+import config_live as _ADM_CONFIG
+ADM_FILENAME_TEMPLATE = getattr(_ADM_CONFIG, "OUTPUT_FILENAME_TEMPLATE", "ADM_forecast_{date}.xlsx")
+GDZ_LIVE_ROOT = getattr(_ADM_CONFIG, "GDZ_LIVE_ROOT", ROOT.parent / "gdz talep" / "live")
 EXCEL_REPORT = DELIVERY_ROOT / "STLF_LIVE_RAPOR.xlsx"
 
 # GDZ'nin kendi kok dizini (run summary log'lari + OUTPUT_FILENAME_TEMPLATE icin)
@@ -150,9 +152,9 @@ def check_readiness() -> dict:
 
     missing_files: list[str] = []
     if adm_ran and gdz_ran and target_match:
-        # Ortak STLF raporu bu kontrolden SONRA, kullanici butona bastigi anda
-        # uretilir. Readiness'ta yalnizca iki forecast + iki diagnostic aranir.
-        for src, archive_name in expected_files(adm_target, include_report=False).values():
+        # Ortak STLF raporu forecast pipeline'lari tarafindan daha once uretilmis
+        # olmalidir. MRC/musteri gonderim butonu rapor olusturma noktasi degildir.
+        for src, archive_name in expected_files(adm_target, include_report=True).values():
             if not src or not src.exists():
                 missing_files.append(archive_name)
 
@@ -249,20 +251,9 @@ def run(audience: str = "internal") -> dict:
     fc_date = readiness["adm"]["target_date"]  # == gdz target_date (check_readiness garanti eder)
     EXCEL_REPORT = dated_output_path(DELIVERY_ROOT, fc_date, "STLF_LIVE_RAPOR.xlsx", create=True)
 
-    # Kullanici onayi ortak raporun TEK uretim noktasi. SMTP ayarsiz olsa bile
-    # butona basildiginda rapor olusur; rapor hatasi email gonderimini durdurur.
-    try:
-        report_path = ROOT / "pipeline" / "07_report_excel.py"
-        spec = importlib.util.spec_from_file_location("stlf_report_on_approval", report_path)
-        report_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(report_mod)
-        report_result = report_mod.run()
-        if report_result.get("status") != "ok" or not EXCEL_REPORT.exists():
-            raise RuntimeError(f"Rapor sonucu gecersiz: {report_result}")
-        print(f"     Ortak ADM+GDZ raporu hazir: {EXCEL_REPORT}")
-    except Exception as e:
-        print(f"     Ortak rapor olusturulamadi; email gonderilmedi: {e}")
-        return {"status": "report_error", "error": str(e)}
+    # Rapor burada uretilmez. ADM/GDZ forecast ve tahmin revizyon akislari raporu
+    # aninda gunceller; readiness yukarida eksik/bayat olmayan dosyayi zorunlu tutar.
+    print(f"     Ortak ADM+GDZ raporu hazir: {EXCEL_REPORT}")
 
     if not SMTP_HOST or not SMTP_USER:
         print("     SMTP ayarlari yapilmamis (env: STLF_SMTP_HOST/USER/PASS) — rapor olustu, email atlandi.")
@@ -303,7 +294,7 @@ def run(audience: str = "internal") -> dict:
 
 <h3>📊 Ekli Dosyalar</h3>
 <ul>
-  <li><b>STLF_LIVE_RAPOR.xlsx</b> — ADM + GDZ, 5 tablo, guncel veri</li>
+  <li><b>STLF_LIVE_RAPOR.xlsx</b> — ADM + GDZ; gerceklesen, D+2 tahmin ve mutlak sapma tablolari</li>
   <li><b>ADM_forecast_{fc_date}.xlsx</b> — ADM teslim excel'i</li>
   <li><b>GDZ_forecast_{fc_date}.xlsx</b> — GDZ teslim excel'i</li>
   <li><b>diagnostic_adm_{fc_date}.html</b> — ADM interaktif Chart.js dashboard</li>

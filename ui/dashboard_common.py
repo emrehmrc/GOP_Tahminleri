@@ -12,6 +12,7 @@ benzersiz sys.modules anahtarını alıyor, çakışma imkansız.
 
 import sys
 import subprocess
+import importlib
 import importlib.util
 from pathlib import Path
 from datetime import date
@@ -24,17 +25,51 @@ LIVE_DIR = UI_DIR.parent
 GDZ_DIR  = LIVE_DIR.parent / "gdz talep"
 GDZ_LIVE_DIR = GDZ_DIR / "live"
 
-if str(LIVE_DIR) not in sys.path:
-    sys.path.insert(0, str(LIVE_DIR))
+if str(LIVE_DIR) in sys.path:
+    sys.path.remove(str(LIVE_DIR))
+sys.path.insert(0, str(LIVE_DIR))
 if str(LIVE_DIR / "src") not in sys.path:
     sys.path.insert(0, str(LIVE_DIR / "src"))
 
-from config_live import LIVE_DATA_DIR, MASTER_PARQUET, RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL
+
+def refresh_adm_config():
+    """Streamlit hot-reload sonrasinda config_live cache'ini dosyayla esitle.
+
+    Streamlit ana scripti yeniden calistirirken bagimli modulleri sys.modules'da
+    tutabilir. config_live.py'ye sonradan eklenen sabitler bu durumda dosyada
+    bulunsa bile eski modul nesnesinde gorunmez. Her dinamik pipeline importundan
+    once ayni modul nesnesini reload etmek hem mevcut baglantilari korur hem de
+    yeni sabitleri yukler.
+    """
+    expected = (LIVE_DIR / "config_live.py").resolve()
+    cached = sys.modules.get("config_live")
+    cached_file = Path(getattr(cached, "__file__", "")).resolve() if cached else None
+    importlib.invalidate_caches()
+    if cached is not None and cached_file == expected:
+        try:
+            return importlib.reload(cached)
+        except (ImportError, ModuleNotFoundError):
+            # Bazi dinamik import bicimleri modul spec'ini reload icin gecersiz
+            # birakabilir. Bu durumda temiz bir normal import ayni isi gorur.
+            sys.modules.pop("config_live", None)
+    if cached is not None:
+        # Ayni isimle baska projenin config'i yuklenmisse ADM config'ine gec.
+        sys.modules.pop("config_live", None)
+    return importlib.import_module("config_live")
+
+
+_ADM_CONFIG = refresh_adm_config()
+LIVE_DATA_DIR = _ADM_CONFIG.LIVE_DATA_DIR
+MASTER_PARQUET = _ADM_CONFIG.MASTER_PARQUET
+RAW_TARGET_COL = _ADM_CONFIG.RAW_TARGET_COL
+RAW_DATE_COL = _ADM_CONFIG.RAW_DATE_COL
+RAW_HOUR_COL = _ADM_CONFIG.RAW_HOUR_COL
 from src.data_scanner import get_ingestion_candidates, scan_available_days
 
 
 def import_pipeline_step(module_filename: str):
     """adm live/pipeline/<NN_name>.py dosya-yolu ile import (rakamla başlayan isimler normal import'a uygun değil)."""
+    refresh_adm_config()
     path = LIVE_DIR / "pipeline" / f"{module_filename}.py"
     spec = importlib.util.spec_from_file_location(module_filename, path)
     mod = importlib.util.module_from_spec(spec)

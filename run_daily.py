@@ -116,6 +116,16 @@ def main():
                             target_date=args.target)
         summary["steps"]["06_deliver"] = result06
 
+        # Forecast olusur olusmaz ortak raporun ADM sheet'ini guncelle.
+        # Email adimi raporun ilk olusma noktasi degildir.
+        try:
+            summary["steps"]["07_report"] = run_step(
+                "07_REPORT", _step_import("07_report_excel").run,
+                target_date=result06.get("target_date"), edas="ADM",
+            )
+        except Exception as e:
+            log.warning(f"STLF raporu guncellenemedi (teslimi etkilemez): {e}")
+
         # Faz 1 (2026-07-13): forecast_log -> DuckDB view'ları -> yedek ->
         # reconcile (heal+tamlık) -> scorecard -> alarm, tek ortak fonksiyonda
         # (bkz. src/run_context.py:finalize_run — eskiden burada 4 ayrı try/except

@@ -14,11 +14,13 @@ Kanonik `merged` kolonları (wrapper doldurur):
     temp    : hissedilen sıcaklık (°C)
     ghi     : global ışınım (W/m²)   [opsiyonel]
     cloud   : bulutluluk (%)          [opsiyonel]
+    humidity: nem (%)                 [opsiyonel]
     wind    : rüzgar (m/s veya km/s)  [opsiyonel]
+    precip  : yağış                  [opsiyonel]
     special : özel gün adı (str) ya da "Değil"/None  [opsiyonel]
 
 fc      : D+2 tahmini, 24 değerli liste
-fc_wx   : {"temp":[24], "ghi":[24]}  D+2 tahmin havası [opsiyonel]
+fc_wx   : temp/ghi/cloud/humidity/wind/precip 24 saatlik tahmin havası
 """
 import json
 import numpy as np
@@ -57,10 +59,238 @@ def _slope(x, y):
     return _f(b)
 
 
+FEATURE_LABELS = {
+    "temp": "çok-istasyon sıcaklık",
+    "ghi": "güneş ışınımı (GHI)",
+    "cloud": "bulutluluk",
+    "humidity": "nem",
+    "wind": "rüzgâr",
+    "precip": "yağış",
+    "lag1": "D-1 aynı saat yükü",
+    "lag2": "D-2 aynı saat yükü",
+    "lag7": "D-7 aynı saat yükü",
+    "lag14": "D-14 aynı saat yükü",
+    "asof_d": "son erişilebilir D yükü",
+    "asof_d1": "son erişilebilir D-1 yükü",
+    "asof_d7": "son erişilebilir D-7 yükü",
+    "roll7": "son 7 gün yük seviyesi",
+    "roll14": "son 14 gün yük seviyesi",
+    "weekly_profile": "son haftaların aynı saat profili",
+    "profile_prev": "son erişilebilir gün komşu saat",
+    "profile_next": "son erişilebilir gün komşu saat",
+    "dow_sin": "haftanın günü",
+    "dow_cos": "haftanın günü",
+    "is_saturday": "cumartesi etkisi",
+    "is_sunday": "pazar etkisi",
+    "is_special": "tatil/özel gün",
+    "trend": "uzun dönem yük trendi",
+}
+
+
+def _lookup_load(grid, dates, hours):
+    parsed = pd.to_datetime(dates)
+    normalized = parsed.dt.normalize() if isinstance(parsed, pd.Series) else parsed.normalize()
+    keys = pd.MultiIndex.from_arrays([normalized, hours])
+    return grid.reindex(keys).to_numpy(dtype=float)
+
+
+def _add_consolidated_features(merged):
+    """Yalnizca gecmis bilgiyi kullanan takvim, lag ve profil feature'lari."""
+    out = merged.sort_values(['dt', 'h']).drop_duplicates(['dt', 'h'], keep='last').copy()
+    out['dt'] = pd.to_datetime(out['dt']).dt.normalize()
+    out['h'] = out['h'].astype(int)
+    grid = out.set_index(['dt', 'h'])['load'].astype(float).sort_index()
+    for lag in range(1, 16):
+        out[f"_lag{lag}"] = _lookup_load(grid, out['dt'] - pd.Timedelta(days=lag), out['h'])
+    for lag in (21, 28):
+        out[f"_lag{lag}"] = _lookup_load(grid, out['dt'] - pd.Timedelta(days=lag), out['h'])
+    out['lag1'] = out['_lag1']; out['lag2'] = out['_lag2']
+    out['lag7'] = out['_lag7']; out['lag14'] = out['_lag14']
+    # Canli veri bir gun gecikmeli gelir: hedef-2 = issue gununde bilinen son D.
+    out['asof_d'] = out['_lag2']; out['asof_d1'] = out['_lag3']; out['asof_d7'] = out['_lag9']
+    out['roll7'] = out[[f"_lag{i}" for i in range(2, 9)]].mean(axis=1, skipna=True)
+    out['roll14'] = out[[f"_lag{i}" for i in range(2, 16)]].mean(axis=1, skipna=True)
+    out['weekly_profile'] = out[["_lag7", "_lag14", "_lag21", "_lag28"]].mean(axis=1, skipna=True)
+    prev_hours = (out['h'] - 1).where(out['h'] > 0, np.nan)
+    next_hours = (out['h'] + 1).where(out['h'] < 23, np.nan)
+    out['profile_prev'] = _lookup_load(grid, out['dt'] - pd.Timedelta(days=2), prev_hours)
+    out['profile_next'] = _lookup_load(grid, out['dt'] - pd.Timedelta(days=2), next_hours)
+    out['dow_sin'] = np.sin(2 * np.pi * out['dow'] / 7.0)
+    out['dow_cos'] = np.cos(2 * np.pi * out['dow'] / 7.0)
+    out['is_saturday'] = (out['dow'] == 5).astype(float)
+    out['is_sunday'] = (out['dow'] == 6).astype(float)
+    special = out.get('special', pd.Series(index=out.index, dtype=object)).astype(str)
+    out['is_special'] = (~special.isin(['None', 'nan', '', 'Değil', 'Degil'])).astype(float)
+    return out, grid
+
+
+def _target_features(history, grid, target, hour, fc_wx, model_signal):
+    def lag(day, target_hour=hour):
+        if target_hour < 0 or target_hour > 23:
+            return np.nan
+        return grid.get((pd.Timestamp(target).normalize() - pd.Timedelta(days=day), int(target_hour)), np.nan)
+
+    values = {}
+    for key in ('temp', 'ghi', 'cloud', 'humidity', 'wind', 'precip'):
+        seq = (fc_wx or {}).get(key) or []
+        values[key] = seq[hour] if len(seq) > hour else np.nan
+    def available_mean(items):
+        valid = [float(value) for value in items if _f(value) is not None]
+        return float(np.mean(valid)) if valid else np.nan
+
+    values.update({
+        'lag1': lag(1), 'lag2': lag(2), 'lag7': lag(7), 'lag14': lag(14),
+        'asof_d': lag(2), 'asof_d1': lag(3), 'asof_d7': lag(9),
+        'roll7': available_mean([lag(i) for i in range(2, 9)]),
+        'roll14': available_mean([lag(i) for i in range(2, 16)]),
+        'weekly_profile': available_mean([lag(i) for i in (7, 14, 21, 28)]),
+        'profile_prev': lag(2, hour - 1), 'profile_next': lag(2, hour + 1),
+    })
+    dow = target.weekday()
+    values.update({
+        'dow_sin': np.sin(2 * np.pi * dow / 7.0),
+        'dow_cos': np.cos(2 * np.pi * dow / 7.0),
+        'is_saturday': float(dow == 5), 'is_sunday': float(dow == 6),
+        'is_special': float(any(bool((model_signal or {}).get(k)) for k in
+                                ('flag_holiday', 'flag_bridge', 'flag_ramadan'))),
+        'trend': 0.0,
+    })
+    return values
+
+
+def _consolidated_hour(sh, query, target, fc_value, model_signal, performance):
+    """Ridge + analog + model uzlasisi + bias duzeltmeli konsolide beklenti."""
+    candidates = [
+        'temp', 'ghi', 'cloud', 'humidity', 'wind', 'precip',
+        'lag1', 'lag7', 'lag14', 'asof_d', 'asof_d1', 'asof_d7',
+        'roll7', 'roll14', 'weekly_profile',
+        'profile_prev', 'profile_next', 'dow_sin', 'dow_cos',
+        'is_saturday', 'is_sunday', 'is_special', 'trend',
+    ]
+    train = sh.copy()
+    train['trend'] = (train['dt'] - pd.Timestamp(target)).dt.days.astype(float) / 365.0
+    features = []
+    for name in candidates:
+        qv = _f(query.get(name))
+        if qv is None or name not in train:
+            continue
+        vals = pd.to_numeric(train[name], errors='coerce')
+        if vals.notna().sum() >= 25 and float(vals.std(skipna=True) or 0.0) > 1e-8:
+            features.append(name)
+    if len(train) < 25 or len(features) < 2:
+        return None
+
+    X = train[features].apply(pd.to_numeric, errors='coerce').to_numpy(float)
+    Y = pd.to_numeric(train['load'], errors='coerce').to_numpy(float)
+    valid_y = np.isfinite(Y)
+    X, Y, train = X[valid_y], Y[valid_y], train.loc[valid_y]
+    med = np.nanmedian(X, axis=0)
+    X = np.where(np.isnan(X), med, X)
+    q = np.array([float(query[name]) for name in features], dtype=float)
+    q = np.where(np.isnan(q), med, q)
+    mean = np.mean(X, axis=0); std = np.std(X, axis=0)
+    std = np.where(std < 1e-8, 1.0, std)
+    Z = (X - mean) / std; zq = (q - mean) / std
+
+    age_days = (pd.Timestamp(target) - pd.to_datetime(train['dt'])).dt.days.to_numpy(float)
+    weights = np.power(0.5, np.maximum(age_days, 0) / 540.0)
+    design = np.column_stack([np.ones(len(Z)), Z])
+    root_w = np.sqrt(weights)
+    wd = design * root_w[:, None]; wy = Y * root_w
+    penalty = np.eye(design.shape[1]) * 3.0; penalty[0, 0] = 0.0
+    try:
+        beta = np.linalg.solve(wd.T @ wd + penalty, wd.T @ wy)
+    except np.linalg.LinAlgError:
+        beta = np.linalg.pinv(wd.T @ wd + penalty) @ (wd.T @ wy)
+    fitted = design @ beta
+    ridge_pred = float(np.dot(np.r_[1.0, zq], beta))
+    resid = Y - fitted
+    denom = float(np.sum(weights * (Y - np.average(Y, weights=weights)) ** 2))
+    r2 = 1.0 - float(np.sum(weights * resid ** 2)) / denom if denom > 1e-9 else 0.0
+    r2 = float(np.clip(r2, -1.0, 1.0))
+
+    analog_features = [i for i, name in enumerate(features) if name != 'trend']
+    analog_pred = None; analog_distance = None
+    if analog_features:
+        dist = np.sqrt(np.mean((Z[:, analog_features] - zq[analog_features]) ** 2, axis=1))
+        k = min(30, len(dist))
+        nearest = np.argsort(dist)[:k]
+        dw = np.exp(-np.clip(dist[nearest], 0, 20))
+        analog_pred = float(np.average(Y[nearest], weights=dw)) if dw.sum() > 0 else float(np.mean(Y[nearest]))
+        analog_distance = float(np.mean(dist[nearest]))
+
+    model_values = [float(model_signal.get(k)) for k in ('xgb', 'lgbm', 'cat', 'chronos')
+                    if _f((model_signal or {}).get(k)) is not None]
+    model_center = float(np.median(model_values)) if len(model_values) >= 2 else None
+    model_spread = float(np.std(model_values)) if len(model_values) >= 2 else None
+    perf = performance or {}
+    bias30 = _f(perf.get('bias30')); mape30 = _f(perf.get('mape30')); n30 = int(perf.get('n30') or 0)
+    # Kullanici Excel'i sonradan degistirse bile ikinci gorus kendi kendini takip
+    # etmesin: bias uzmani pipeline'in ozgun final sinyalinden baslar.
+    bias_base = _f((model_signal or {}).get('final'))
+    if bias_base is None:
+        bias_base = _f(fc_value)
+    bias_corrected = float(bias_base - bias30) if bias_base is not None and bias30 is not None and n30 >= 3 else None
+
+    analog_score = 1.0 / (1.0 + max(analog_distance or 2.0, 0.0))
+    consensus_score = 0.5
+    if model_center and model_spread is not None:
+        consensus_score = float(np.clip(1.0 - (model_spread / abs(model_center)) / 0.10, 0.0, 1.0))
+    perf_reliability = min(n30 / 20.0, 1.0) * (1.0 - min((mape30 or 15.0) / 15.0, 1.0))
+    experts = [("ridge", ridge_pred, 0.25 + 0.25 * max(r2, 0.0))]
+    if analog_pred is not None:
+        experts.append(("analog", analog_pred, 0.08 + 0.22 * analog_score))
+    if bias_corrected is not None:
+        experts.append(("bias", bias_corrected, 0.05 + 0.15 * perf_reliability))
+    if model_center is not None:
+        experts.append(("models", model_center, 0.05 + 0.10 * consensus_score))
+    expert_weights = np.array([item[2] for item in experts], float)
+    expert_values = np.array([item[1] for item in experts], float)
+    expected = float(np.average(expert_values, weights=expert_weights))
+
+    residual_half = float(np.percentile(np.abs(resid), 95)) if len(resid) else 0.0
+    expert_half = float(np.std(expert_values) * 1.96) if len(expert_values) > 1 else 0.0
+    model_half = float((model_spread or 0.0) * 1.96)
+    half_width = max(residual_half, expert_half, model_half, abs(expected) * 0.01)
+    lo, hi = expected - half_width, expected + half_width
+    band_pct = (2.0 * half_width / abs(expected) * 100.0) if abs(expected) > 1e-9 else 100.0
+
+    sample_score = min(len(train) / 120.0, 1.0)
+    fit_score = float(np.clip((r2 + 0.10) / 0.80, 0.0, 1.0))
+    band_score = float(np.clip(1.0 - band_pct / 25.0, 0.0, 1.0))
+    performance_score = perf_reliability if n30 else 0.35
+    confidence_score = 100.0 * (
+        0.20 * sample_score + 0.22 * fit_score + 0.18 * analog_score +
+        0.15 * consensus_score + 0.15 * performance_score + 0.10 * band_score
+    )
+    confidence = "Yüksek" if confidence_score >= 72 else "Orta" if confidence_score >= 50 else "Düşük"
+    importance = sorted(zip(features, np.abs(beta[1:])), key=lambda x: x[1], reverse=True)
+    drivers = []
+    for name, _ in importance:
+        label = FEATURE_LABELS.get(name, name)
+        if label not in drivers:
+            drivers.append(label)
+        if len(drivers) == 4:
+            break
+    return {
+        "exp": _f(expected), "lo": _f(lo), "hi": _f(hi),
+        "ridge_exp": _f(ridge_pred), "analog_exp": _f(analog_pred),
+        "analog_distance": _f(analog_distance), "r2": _f(r2),
+        "model_center": _f(model_center), "model_spread": _f(model_spread),
+        "bias_corrected": _f(bias_corrected), "bias7": _f(perf.get('bias7')),
+        "mape7": _f(perf.get('mape7')), "bias30": bias30, "mape30": mape30,
+        "perf_n7": int(perf.get('n7') or 0), "perf_n30": n30,
+        "band_pct": _f(band_pct), "confidence": confidence,
+        "confidence_score": _f(confidence_score), "drivers": drivers,
+        "features_used": features, "expert_weights": {name: _f(weight / expert_weights.sum())
+                                                         for (name, _, weight) in experts},
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  COMPUTE
 # ══════════════════════════════════════════════════════════════════════
-def compute(merged, fc, fc_wx, fc_date, edas):
+def compute(merged, fc, fc_wx, fc_date, edas, model_signals=None, hourly_performance=None):
     merged = merged.copy()
     merged['dow'] = merged['dt'].dt.dayofweek
     merged['month'] = merged['dt'].dt.month
@@ -79,6 +309,10 @@ def compute(merged, fc, fc_wx, fc_date, edas):
         for d, name in sp.groupby(sp['dt'].dt.date)['special'].first().items():
             special_map[str(d)] = str(name)
 
+    # Konsolide beklenti icin lag/seviye/profil feature'lari yalnizca gecmise
+    # bakacak sekilde bir kez olusturulur.
+    merged, load_grid = _add_consolidated_features(merged)
+
     def gs(ds):
         d = pd.Timestamp(ds).date()
         day = merged[merged['dt'].dt.date == d]
@@ -92,6 +326,8 @@ def compute(merged, fc, fc_wx, fc_date, edas):
         if has_ghi:   r["ghi"] = [_f(v) for v in day['ghi'].values]
         if has_cloud: r["cloud"] = [_f(v) for v in day['cloud'].values]
         if has_wind:  r["wind"] = [_f(v) for v in day['wind'].values]
+        if 'humidity' in day: r["humidity"] = [_f(v) for v in day['humidity'].values]
+        if 'precip' in day: r["precip"] = [_f(v) for v in day['precip'].values]
         r["special"] = special_map.get(str(d))
         return r
 
@@ -109,7 +345,8 @@ def compute(merged, fc, fc_wx, fc_date, edas):
         seg = merged[merged['h'] == h].dropna(subset=['load'])
         if len(seg) < 40:
             continue
-        err = seg['load'].values - seg['load'].shift(168).values
+        # seg yalnizca tek bir saati icerir; 7 satir = bir hafta onceki ayni saat.
+        err = seg['load'].values - seg['load'].shift(7).values
         err = err[~np.isnan(err)]
         if len(err) > 50:
             ml = float(np.mean(seg['load'].values))
@@ -164,9 +401,10 @@ def compute(merged, fc, fc_wx, fc_date, edas):
             r = np.corrcoef(sh['temp'].values, sh['load'].values)[0, 1]
             hte[h] = {"slope": _f(sl), "r2": _f(r * r), "n": int(len(sh))}
 
-    # ── REC: HAVA-KOŞULLU saatlik öneri motoru + P95 aralık ───────────
-    # Her saat için: geçmişte (aynı saat, ±ay penceresi) sıcaklık/ışınıma
-    # göre beklenen yük + P95 aralığı; model tahminini kıyasla.
+    # ── REC: KONSOLIDE saatlik ikinci-gorus motoru + belirsizlik ──────────
+    # Ridge (takvim+lag+coklu hava), benzer gun, model uzlasisi ve son
+    # performans bias'i birlestirilir. Final forecast yalnizca uzmanlardan biri;
+    # istatistiksel omurga ayrica korunur.
     rec = []
     ref = cp.get("1 hafta once")
     doy0 = TODAY.timetuple().tm_yday
@@ -177,39 +415,31 @@ def compute(merged, fc, fc_wx, fc_date, edas):
     recent = merged['dt'] >= (pd.Timestamp(TODAY) - pd.Timedelta(days=1100))
     daytype = (merged['dow'] >= 5) if tgt_weekend else (merged['dow'] < 5)
     base_mask = (dd <= 40) & recent & daytype
-    t0 = pd.Timestamp(TODAY)
-    tgt_t = 0.0  # bugün referans; geçmiş günler negatif (yıl-üstü büyüme trendi)
     for h in range(24):
         temp_fc = fc_wx.get("temp", [None] * 24)[h] if fc_wx else None
-        ghi_fc = fc_wx.get("ghi", [None] * 24)[h] if fc_wx else None
-        sh = merged[base_mask & (merged['h'] == h)].dropna(subset=['temp', 'load'])
+        signal = (model_signals or {}).get(h, {})
+        perf = (hourly_performance or {}).get(h, {})
+        sh = merged[base_mask & (merged['h'] == h) &
+                    (merged['dt'] < pd.Timestamp(TODAY))].dropna(subset=['load'])
         if len(sh) < 25:  # gün-tipi filtresi çok daralttıysa mevsim+son 3 yıla düş
-            sh = merged[(dd <= 40) & recent & (merged['h'] == h)].dropna(subset=['temp', 'load'])
+            sh = merged[(dd <= 40) & recent & (merged['h'] == h) &
+                        (merged['dt'] < pd.Timestamp(TODAY))].dropna(subset=['load'])
         entry = {"h": h, "fc": _f(fc[h]) if fc else None, "temp_fc": _f(temp_fc),
                  "n": int(len(sh)), "exp": None, "lo": None, "hi": None,
-                 "lastweek": _f(ref["load"][h]) if ref and ref.get("load") else None}
-        if len(sh) >= 25 and temp_fc is not None:
-            X = sh['temp'].values.astype(float)
-            Y = sh['load'].values.astype(float)
-            # zaman trendi (yıl gün): yıl-üstü yük büyümesini soğurur, seviyeyi bugüne getirir
-            tt = (sh['dt'] - t0).dt.days.values.astype(float) / 365.0
-            cols = [np.ones_like(X), X, tt]
-            xq = [1.0, float(temp_fc), tgt_t]
-            if has_ghi and ghi_fc is not None and sh['ghi'].notna().sum() > 20:
-                g = sh['ghi'].fillna(sh['ghi'].median()).values.astype(float)
-                if np.std(g) > 5:
-                    cols.append(g); xq.append(float(ghi_fc))
-            A = np.column_stack(cols)
-            try:
-                beta, *_ = np.linalg.lstsq(A, Y, rcond=None)
-                pred = float(np.dot(xq, beta))
-                resid = Y - A.dot(beta)
-                entry["exp"] = _f(pred)
-                entry["lo"] = _f(pred + np.percentile(resid, 2.5))
-                entry["hi"] = _f(pred + np.percentile(resid, 97.5))
-                entry["slope_temp"] = _f(beta[1])
-            except np.linalg.LinAlgError:
-                pass
+                 "lastweek": _f(ref["load"][h]) if ref and ref.get("load") else None,
+                 "models": {k: _f(signal.get(k)) for k in
+                            ('xgb', 'lgbm', 'cat', 'chronos', 'ensemble')},
+                 "weather": {
+                     k: _f(((fc_wx or {}).get(k) or [None] * 24)[h])
+                     for k in ('temp', 'ghi', 'cloud', 'humidity', 'wind', 'precip')
+                 }}
+        if len(sh) >= 25:
+            query = _target_features(merged, load_grid, TODAY, h, fc_wx, signal)
+            result = _consolidated_hour(
+                sh, query, TODAY, fc[h] if fc else None, signal, perf,
+            )
+            if result:
+                entry.update(result)
         rec.append(entry)
 
     # ── DRIFT: D→D+2 sıcaklık & tüketim kayması ───────────────────────
@@ -276,7 +506,11 @@ def compute(merged, fc, fc_wx, fc_date, edas):
         "WX": fc_wx if fc_wx else None, "CP": cp, "SN": sn, "SNB": snb,
         "P95": p95, "P95K": [int(k) for k in p95.keys()], "HTE": hte,
         "REC": rec, "DRIFT": drift, "SPECIAL": special,
-        "HAS": {"ghi": has_ghi, "cloud": has_cloud, "wind": has_wind},
+        "MODEL_SIGNALS": model_signals or {},
+        "HOURLY_PERFORMANCE": hourly_performance or {},
+        "HAS": {"ghi": has_ghi, "cloud": has_cloud, "wind": has_wind,
+                "humidity": bool('humidity' in merged and merged['humidity'].notna().sum() > 100),
+                "precip": bool('precip' in merged and merged['precip'].notna().sum() > 100)},
     }
 
 
@@ -424,23 +658,25 @@ T.cross=()=>{const k=Object.keys(CP);if(!k.length)return '<h2>Cross Check</h2><p
  if(HAS.ghi)cells+='<div class="panel"><h3>GHI &times; Yuk</h3><div class="chartbox"><canvas id="cx2"></canvas></div></div>';
  if(HAS.cloud)cells+='<div class="panel"><h3>Bulut &times; Yuk</h3><div class="chartbox"><canvas id="cx3"></canvas></div></div>';
  if(HAS.wind)cells+='<div class="panel"><h3>Ruzgar &times; Yuk</h3><div class="chartbox"><canvas id="cx4"></canvas></div></div>';
+ if(HAS.humidity)cells+='<div class="panel"><h3>Nem &times; Yuk</h3><div class="chartbox"><canvas id="cx5"></canvas></div></div>';
+ if(HAS.precip)cells+='<div class="panel"><h3>Yagis &times; Yuk</h3><div class="chartbox"><canvas id="cx6"></canvas></div></div>';
  return '<h2>Cross Check</h2><p class="lead">Referans gunlerde hava &times; yuk sacilimi</p><div class="grid2">'+cells+'</div>';};
 g._i.cross=()=>{const k=Object.keys(CP);if(!k.length)return;
- function sc(id,key,ax){let ds=[];if(key==='temp'&&WX&&WX.temp&&FC)ds.push({label:'TAHMIN',data:WX.temp.map((v,i)=>({x:v,y:FC[i]})),backgroundColor:'#E53935',pointRadius:5});
+ function sc(id,key,ax){let ds=[];if(WX&&WX[key]&&FC)ds.push({label:'TAHMIN',data:WX[key].map((v,i)=>({x:v,y:FC[i]})),backgroundColor:'#E53935',pointRadius:5});
   k.forEach((l,i)=>{if(CP[l][key]&&CP[l].load)ds.push({label:l,data:CP[l][key].map((v,j)=>({x:v,y:CP[l].load[j]})),backgroundColor:pal[(i+1)%pal.length],pointRadius:3});});
   if(ds.length)ch(id,{type:'scatter',data:{datasets:ds},options:{plugins:{legend:LEG},scales:{x:AX(ax),y:AX('MWh')}}});}
- sc('cx1','temp','C');if(HAS.ghi)sc('cx2','ghi','GHI W/m2');if(HAS.cloud)sc('cx3','cloud','Bulut %');if(HAS.wind)sc('cx4','wind','Ruzgar');};
+ sc('cx1','temp','C');if(HAS.ghi)sc('cx2','ghi','GHI W/m2');if(HAS.cloud)sc('cx3','cloud','Bulut %');if(HAS.wind)sc('cx4','wind','Ruzgar');if(HAS.humidity)sc('cx5','humidity','Nem %');if(HAS.precip)sc('cx6','precip','Yagis');};
 
-// ═══ TAB 5: ONERILER (hava-kosullu) ═══
-T.rec=()=>{let h='<h2>Oneriler</h2><p class="lead">Her saat: modelin tahmini vs gecmis havaya gore beklenen yuk (P95 aralik)</p>';
- if(REC&&REC.some(r=>r.exp!=null))h+='<div class="panel"><h3>Model tahmini vs beklenen (hava-kosullu) + P95 bandi</h3><div class="chartbox tall"><canvas id="cr1"></canvas></div></div>';
+// ═══ TAB 5: ONERILER (konsolide ikinci gorus) ═══
+T.rec=()=>{let h='<h2>Oneriler</h2><p class="lead">Takvim + gecmis yuk + cok-istasyon hava + benzer gun + model uzlasisi + saatlik performans</p>';
+ if(REC&&REC.some(r=>r.exp!=null))h+='<div class="panel"><h3>Model tahmini vs konsolide beklenti + %95 belirsizlik bandi</h3><div class="chartbox tall"><canvas id="cr1"></canvas></div></div>';
  h+='<div id="recList"></div>';return h;};
 g._i.rec=()=>{
  if(!REC)return;
  const hasExp=REC.some(r=>r.exp!=null);
  if(hasExp)ch('cr1',{type:'line',data:{labels:hrs,datasets:[
    {label:'MODEL',data:REC.map(r=>r.fc),borderColor:'#E53935',borderWidth:3,pointRadius:3},
-   {label:'Beklenen (hava)',data:REC.map(r=>r.exp),borderColor:'#5ad1a0',borderWidth:2,pointRadius:2,borderDash:[5,3]},
+   {label:'Konsolide Beklenen',data:REC.map(r=>r.exp),borderColor:'#5ad1a0',borderWidth:2,pointRadius:2,borderDash:[5,3]},
    {label:'P95 ust',data:REC.map(r=>r.hi),borderColor:'transparent',backgroundColor:'rgba(90,209,160,.10)',pointRadius:0,fill:'+1'},
    {label:'P95 alt',data:REC.map(r=>r.lo),borderColor:'transparent',pointRadius:0,fill:false}
   ]},options:{plugins:{legend:LEG},scales:{x:AX(),y:AX('MWh')}}});
@@ -453,18 +689,23 @@ g._i.rec=()=>{
  }).sort((a,b)=>b.gap-a.gap);
  let top=flagged.filter(r=>r.out||r.gap>15).slice(0,8);
  let html='';
- if(!top.length)html='<div class="rm ok"><h4>Model hava beklentisiyle uyumlu</h4><p>Hicbir saatte model tahmini P95 bandi disinda degil; belirgin sapma yok.</p></div>';
+ if(!top.length)html='<div class="rm ok"><h4>Model konsolide beklentiyle uyumlu</h4><p>Hicbir saatte model tahmini belirsizlik bandi disinda degil; belirgin sapma yok.</p></div>';
  top.forEach(r=>{const cls=r.out?'danger':'warn';
    html+='<div class="rm '+cls+'"><h4>Saat '+r.h+':00 '+(r.out?'<span class="pill" style="background:#3a1f1f;color:#ff9b9b">P95 DISI</span>':'<span class="pill" style="background:#3a331f;color:#ffce6a">SAPMA</span>')+'</h4>';
    html+='<div class="meta"><span>Model: <b>'+fx(r.fc)+' MWh</b></span><span>Beklenen: <b>'+fx(r.exp)+' MWh</b></span>';
-   if(r.lo!=null)html+='<span>P95: '+fx(r.lo)+' &ndash; '+fx(r.hi)+' MWh</span>';html+='<span>n='+r.n+'</span></div>';
+   if(r.lo!=null)html+='<span>%95 bant: '+fx(r.lo)+' &ndash; '+fx(r.hi)+' MWh</span>';
+   html+='<span>Guven: <b>'+(r.confidence||'--')+' '+(r.confidence_score!=null?'%'+fx(r.confidence_score,0):'')+'</b></span><span>n='+r.n+'</span></div>';
    let s='Saat '+r.h+':00 icin model <b>'+fx(r.fc)+' MWh</b> ongoruyor';
    if(r.md!=null)s+=' (gecen haftaya gore '+(r.md>0?'+':'')+fx(r.md)+' MWh)';
-   s+='. Gecmiste bu saat ve mevsimde ~'+fx(r.temp_fc,1)+'C sicaklikta beklenen yuk <b>'+fx(r.exp)+' MWh</b>';
+   s+='. Konsolide ikinci gorus <b>'+fx(r.exp)+' MWh</b>';
    if(r.ed!=null)s+=' (yani ~'+(r.ed>0?'+':'')+fx(r.ed)+' MWh degisim)';
    s+='. ';
+   if(r.r2!=null)s+=' R2='+fx(r.r2,2)+', benzer-gun uzakligi='+fx(r.analog_distance,2)+'.';
+   if(r.model_spread!=null)s+=' Model yayilimi '+fx(r.model_spread)+' MWh.';
+   if(r.mape30!=null)s+=' Saatlik MAPE30 %'+fx(r.mape30,1)+'.';
+   if(r.drivers&&r.drivers.length)s+=' Ana etkenler: <b>'+r.drivers.join(', ')+'</b>. ';
    if(r.out)s+='Model tahmini <b>%95 tahmin araligi ('+fx(r.lo)+'-'+fx(r.hi)+' MWh) DISINDA</b> &mdash; '+(r.fc>r.hi?'asiri yuksek, dusurulmesi':'asiri dusuk, yukseltilmesi')+' degerlendirilebilir.';
-   else s+='Fark P95 icinde ama dikkat: model ile hava-beklentisi arasinda ~'+fx(r.gap)+' MWh acik var.';
+   else s+='Fark belirsizlik bandi icinde; model ile konsolide beklenti arasinda ~'+fx(r.gap)+' MWh acik var.';
    html+='<p>'+s+'</p></div>';});
  document.getElementById('recList').innerHTML=html;};
 

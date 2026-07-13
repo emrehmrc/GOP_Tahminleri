@@ -22,11 +22,13 @@ import pandas as pd
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
+import config_live as _CONFIG
 from config_live import (
     LIVE_DATA_DIR, MASTER_PARQUET, ARCHIVE_DIR, OOF_HISTORY_PATH,
     RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL, TENANT,
-    INGEST_OUTLIER_Z_THRESHOLD, INGEST_OUTLIER_LOOKBACK_DAYS,
 )
+INGEST_OUTLIER_Z_THRESHOLD = getattr(_CONFIG, "INGEST_OUTLIER_Z_THRESHOLD", 4.0)
+INGEST_OUTLIER_LOOKBACK_DAYS = getattr(_CONFIG, "INGEST_OUTLIER_LOOKBACK_DAYS", 30)
 from src.data_scanner import find_csv_for_date, find_latest_csv
 from src.oof_feedback import update_oof_history
 from src.forecast_logger import update_actuals_log
