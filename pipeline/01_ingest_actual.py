@@ -222,14 +222,21 @@ def run(target_date: Optional[date] = None, source_name: str = "aydem") -> dict:
         print(f"     [DataQuality] Uyarı: kontrol çalıştırılamadı: {e}")
         dq_result = {"status": "check_failed", "error": str(e)}
 
-    # OOF feedback: dün tahmini ile bugünün actual'ını karşılaştır
+    # OOF feedback: dün tahmini ile bugünün actual'ını karşılaştır. Faz 2 2c-1
+    # (2026-07-13): sonuç artık run()'ın dönüşünde GÖRÜNÜR (eskiden sadece
+    # stdout'a print edilip yutuluyordu) — segment-adaptif ağırlıklandırma
+    # (src/oof_feedback.py:get_segment_weights) canlıya bağlandığında sessiz
+    # OOF kaybı fark edilmeden ağırlıkları bozabilirdi.
     try:
         oof_result = update_oof_history(MASTER_PARQUET, ARCHIVE_DIR, OOF_HISTORY_PATH,
                                          RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL)
         if oof_result.get("status") == "ok":
             print(f"     [OOF] MAPE: {oof_result.get('mape', '?')}")
+        else:
+            print(f"     [OOF] {oof_result.get('status')}")
     except Exception as e:
         print(f"     [OOF] Uyarı: {e}")
+        oof_result = {"status": "check_failed", "error": str(e)}
 
     # Faz 0: actuals_log D+1 yük dalgası (y_actual + data_quality_flag)
     try:
@@ -245,6 +252,7 @@ def run(target_date: Optional[date] = None, source_name: str = "aydem") -> dict:
         "rows_added": len(validated),
         "master_total": len(master),
         "data_quality": dq_result,
+        "oof": oof_result,
     }
 
 

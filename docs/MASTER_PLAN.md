@@ -6,7 +6,7 @@
 |-----|------|-------|
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
 | 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
-| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a+2b tamam, 2c kaldı) |
+| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a+2b tamam, 2c kısmen — segment ağırlık scaffolding, canlı bağlantı OOF verisi birikince) |
 | 3 | Multi-tenant çekirdek | ⬜ |
 | 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ⬜ |
 | 5 | Hijyen + dokümantasyon | ⬜ |
@@ -213,14 +213,27 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
 4. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
    gelir (ADM=haftalık profil ağırlıklı, GDZ=hava ağırlıklı) — Faz 3'teki multi-tenant işinin öncüsü.
 
-### 2c. Learning ensemble (son 30 günden öğrenen)
-1. **OOF beslemesini onar:** `update_oof_history` finalize_run'a bağlanır (hard-fail disiplini);
-   walkforward ile son 30 gün OOF backfill (source="backfill" ayrımı korunur); Chronos-fallback
-   karantinası gevşetilir (fallback günde diğer 3 modelin OOF'u kullanılır, chronos NaN).
-2. **Segment-bazlı adaptif ağırlık:** `hour_block × daytype` segmentlerinde rolling-30g inverse-MAPE
-   veya EWA (exponentially weighted average — expert aggregation literatürü). Config anahtarı:
-   `ENSEMBLE_STRATEGY = "segment_ewa" | "rolling_ridge" | "inverse_mape" | "static"`; mevcut cascade
-   korunur. Dormant `stacking_strategies.py` sınıflarından uygunlar bu arayüze bağlanır.
+### 2c. Learning ensemble (son 30 günden öğrenen) 🔶 kısmen (2026-07-13)
+
+1. ✅ **Chronos-fallback karantinası gevşetildi** (`src/oof_feedback.py:get_inverse_mape_weights`):
+   eskiden chronos_fallback günün TÜM satırı (XGB/LGBM/CAT dahil) eğitimden düşüyordu — artık SADECE
+   CHRONOS_Pred'in kendi MAPE hesabından o satırlar NaN'lanarak çıkarılıyor, diğer modeller o günün
+   OOF'unu hâlâ kullanıyor (zaten kıt olan örnek sayısı gereksiz azalmıyor). `get_rolling_ridge`
+   (çok değişkenli fit, tam satır ister) bilerek whole-row-drop'ta kaldı. 2 yeni test.
+   **`update_oof_history` finalize_run'a taşınmadı** (bilerek — halihazırda `pipeline/01_ingest_actual.py`
+   step 01'de doğru yerde çağrılıyor); bunun yerine sonucu artık `run()` dönüşünde görünür
+   (`result["oof"]`) — eskiden sadece stdout'a print edilip bare `except`le yutuluyordu.
+2. 🔶 **Segment-bazlı adaptif ağırlık — SCAFFOLDING, CANLIYA BAĞLANMADI:**
+   `src/oof_feedback.py:get_segment_weights()` — `hour_block × day_type_group` (aynı 2a-2 grupları)
+   kesişiminde rolling-lookback inverse-MAPE ağırlığı hesaplar, `(hour_block, day_type_group) ->
+   {model: weight}` döner. **Neden canlı cascade'e (04_predict_48h.py:stack_predictions) bağlanmadı:**
+   mevcut canlı `oof_history.parquet` sadece ~4 gün (2026-07-09..12) — 8 segment için anlamlı bir
+   walkforward A/B doğrulaması yapacak kadar veri yok (zaten global `inverse_mape` bile mevcut
+   `min_days=14` eşiğini karşılamıyor, canlıda hâlâ `calibrated_static`'e düşüyor). Yeterli OOF
+   birikince (doğal biriktirme ya da ayrı bir backfill oturumu) walkforward A/B raporu olmadan
+   canlıya bağlanmayacak (governance). 2 yeni test (`tests/test_oof_feedback.py`, sentetik veriyle).
+   `ENSEMBLE_STRATEGY` config anahtarı bilerek EKLENMEDİ — hiçbir şeyi seçmeyen bir flag eklemek
+   erken soyutlama olurdu; wiring yapılacağı oturumda birlikte eklenecek.
 3. **Governance:** hiçbir ağırlık/strateji değişikliği walkforward A/B raporu
    (`output/analysis/ensemble_ab_<date>.md`) olmadan canlıya girmez; canlıya alma = config + commit.
    CAT'in ensemble'dan tamamen çıkarılması da aynı süreçle değerlendirilir (0.05 ağırlık + kötü OOF).

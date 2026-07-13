@@ -240,13 +240,20 @@ def get_inverse_mape_weights(
     Rolling Ridge için yeterli OOF verisi birikmeden önce (henuz < min_samples)
     statik weight'ler yerine guncel model performansina dayali agirlik verir.
 
+    Faz 2 2c-1 (2026-07-13) — karantina gevşetildi: eskiden chronos_fallback
+    günün TÜM satırları (XGB/LGBM/CAT dahil) eğitimden düşürülüyordu. Ama sadece
+    CHRONOS_Pred kirli (XGB kopyası) — diğer 3 modelin o günkü OOF'u geçerli ve
+    zaten kıt olan örnek sayısını gereksiz azaltıyordu. Artık SADECE
+    CHRONOS_Pred'in kendi MAPE hesabından o satırlar NaN'lanarak çıkarılıyor,
+    diğer kolonlar (Ensemble_Pred dahil) chronos_fallback günlerini de kullanır
+    (get_rolling_ridge'te DURUM FARKLI: çok değişkenli fit tam satır ister, o
+    yüzden orada whole-row drop korunuyor).
+
     Returns: {col: weight} normalize edilmis, veya None (yetersiz veri).
     """
     if not oof_path.exists():
         return None
     oof = pd.read_parquet(oof_path)
-    if "chronos_fallback" in oof.columns:
-        oof = oof[~oof["chronos_fallback"].fillna(False)].copy()
     oof["date"] = pd.to_datetime(oof["date"])
     unique_dates = oof["date"].nunique()
     if unique_dates < min_days:
@@ -261,9 +268,19 @@ def get_inverse_mape_weights(
     if len(available) < 2:
         return None
 
+    fallback_mask = (
+        recent["chronos_fallback"].fillna(False) if "chronos_fallback" in recent.columns
+        else pd.Series(False, index=recent.index)
+    )
+
     mape_by_col = {}
     for col in available:
-        d = recent[["actual", col]].dropna()
+        col_series = recent[col]
+        if col == "CHRONOS_Pred":
+            # Sadece bu kolonun kendi MAPE'i icin fallback gunleri NaN'lanir --
+            # diger kolonlar (ve satirlar) etkilenmez (bkz. fonksiyon docstring'i).
+            col_series = col_series.where(~fallback_mask)
+        d = pd.DataFrame({"actual": recent["actual"], col: col_series}).dropna()
         if len(d) < 12:
             continue
         ape = np.abs((d["actual"] - d[col]) / (d["actual"] + 1e-10)) * 100
@@ -280,3 +297,106 @@ def get_inverse_mape_weights(
     print(f"     [Stacker] Inverse-MAPE weights ({len(recent)} samples, {unique_dates}d): "
           f"{ {k: round(v, 3) for k, v in weights.items()} }")
     return weights
+
+
+def _day_type_group_for_dates(dates: pd.Series) -> pd.Series:
+    """monitoring/forecast_logger.py:_calendar_columns ile aynı day_type mantığı
+    (dow + resmi/dini tatil), monitoring/scorecard.py:DAY_TYPE_GROUPS ile aynı
+    4 gruba indirilir (hafta_ici/cumartesi/pazar/ozel_gun) — get_segment_weights
+    ve scorecard'ın segment kırılımı AYNI gruplamayı kullanmalı."""
+    from holiday_calendar import build_holiday_calendar
+    from monitoring.scorecard import DAY_TYPE_GROUPS
+
+    years = list(range(int(dates.dt.year.min()) - 1, int(dates.dt.year.max()) + 2))
+    cal = build_holiday_calendar(years)
+    dow = dates.dt.dayofweek
+
+    def _group(d, wd):
+        meta = cal.get(d.date())
+        is_holiday = meta is not None and meta["holiday_type"] in ("religious", "official")
+        if is_holiday:
+            return "ozel_gun"
+        if wd == 5:
+            return "cumartesi"
+        if wd == 6:
+            return "pazar"
+        return "hafta_ici"
+
+    return pd.Series([_group(d, wd) for d, wd in zip(dates, dow)], index=dates.index)
+
+
+def get_segment_weights(
+    oof_path: Path,
+    pred_cols: list,
+    lookback_days: int = 30,
+    min_samples_per_segment: int = 30,
+) -> Optional[dict]:
+    """Faz 2 2c-2 (2026-07-13): `(hour_block, day_type_group)` segmenti başına
+    rolling-lookback_days inverse-MAPE ağırlığı — MASTER_PLAN.md §2c-2
+    "segment-bazlı adaptif ensemble ağırlıklandırma". `get_inverse_mape_weights`
+    ile aynı mantık, TEK farkla: global değil, HOUR_BLOCKS × DAY_TYPE_GROUPS
+    kesişiminde ayrı ayrı hesaplanır (GDZ'nin akşam/gece/sabah'ta farklı model
+    performansı göstermesi — bkz. 2b-3 segment breakdown bulgusu — global tek
+    ağırlığın gizlediği bir sinyal).
+
+    ÖNEMLİ (2026-07-13 durumu): bu fonksiyon SCAFFOLDING'dir — canlı `04_predict_48h.py`
+    stacking cascade'ine HENÜZ bağlanmadı. Neden: `min_samples_per_segment` her
+    segment için ayrı ayrı sağlanmalı (8 segment × ~30 gün = çok daha fazla OOF
+    tarihi gerekir), mevcut canlı `oof_history.parquet` sadece ~4 gün — segment
+    başına anlamlı bir walkforward A/B doğrulaması için yetersiz. Yeterli OOF
+    birikince (doğal olarak veya ayrı bir backfill oturumunda) walkforward A/B
+    raporu üretilmeden canlı cascade'e eklenmeyecek (governance, MASTER_PLAN.md).
+
+    Returns: {(hour_block, day_type_group): {col: weight}} — segment için yeterli
+    örnek yoksa o segment sözlükte YOKTUR (çağıran taraf global/statik ağırlığa
+    düşmeli). Hiç segment hesaplanamazsa None.
+    """
+    if not oof_path.exists():
+        return None
+    oof = pd.read_parquet(oof_path)
+    oof["date"] = pd.to_datetime(oof["date"])
+
+    unique_dates = oof["date"].nunique()
+    cutoff = oof["date"].max() - timedelta(days=lookback_days)
+    recent = oof[oof["date"] >= cutoff].copy()
+    if recent.empty:
+        return None
+
+    from monitoring.scorecard import HOUR_BLOCKS
+
+    recent["hour_block"] = None
+    for label, hrs in HOUR_BLOCKS.items():
+        recent.loc[recent["hour"].isin(hrs), "hour_block"] = label
+    recent["day_type_group"] = _day_type_group_for_dates(recent["date"])
+
+    fallback_mask = (
+        recent["chronos_fallback"].fillna(False) if "chronos_fallback" in recent.columns
+        else pd.Series(False, index=recent.index)
+    )
+    available = [c for c in pred_cols if c in recent.columns]
+    if len(available) < 2:
+        return None
+
+    segment_weights: dict[tuple[str, str], dict[str, float]] = {}
+    for (hour_block, day_type_group), g in recent.groupby(["hour_block", "day_type_group"]):
+        if hour_block is None or len(g) < min_samples_per_segment:
+            continue
+        mape_by_col = {}
+        for col in available:
+            col_series = g[col].where(~fallback_mask.loc[g.index]) if col == "CHRONOS_Pred" else g[col]
+            d = pd.DataFrame({"actual": g["actual"], col: col_series}).dropna()
+            if len(d) < 8:
+                continue
+            ape = np.abs((d["actual"] - d[col]) / (d["actual"] + 1e-10)) * 100
+            mape_by_col[col] = float(ape.mean())
+        inv = {m: 1.0 / v for m, v in mape_by_col.items() if v > 0 and np.isfinite(v)}
+        if not inv:
+            continue
+        total = sum(inv.values())
+        segment_weights[(hour_block, day_type_group)] = {m: w / total for m, w in inv.items()}
+
+    if not segment_weights:
+        return None
+    print(f"     [Stacker] Segment-adaptive weights: {len(segment_weights)} segment "
+          f"({unique_dates}g OOF, lookback={lookback_days}g)")
+    return segment_weights
