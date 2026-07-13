@@ -175,16 +175,35 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
 1. **Tam post-mortem:** ADM 07-12 actual'ı tam ingest edilince 2a-3 araçlarıyla ADM+GDZ raporu üretilir;
    ADM'de "T+2 > T+1 doğruluk" tersliğinin kökü incelenir (recursive T+1 zinciri, güncel gün feature'ları,
    hava tahmini farkı).
-2. **ADM: haftalık-profil vurgusu (lag168 hipotezi):** deneyler walkforward A/B ile:
-   - Pazar (ve genel hafta sonu) tahminini lag168-tabanlı baseline'a çeken blend
-     (`pred_final = α·pred + (1-α)·lag168_profil`, α gün-tipine göre; sadece backtest kazandırırsa canlıya).
-   - Feature önem analizi: ADM modellerinde lag168/336/504 vs sıcaklık önem dengesi; gerekirse ADM
-     feature setinde haftalık profil feature'ları güçlendirilir (Pazar-özel etkileşimler).
-   - Mevcut hafta sonu split (XGB/LGBM) Pazar'ı Cmt ile aynı torbaya koyuyor — Pazar'a özel split/ağırlık
-     denenir (LGBM Sunday boost 2.5 var ama yetmemiş).
-3. **GDZ: akşam piki + gece profili:** 21-23 sistematik alçak tahmin (07-12'de yine görüldü) için
-   saat-bazlı rezidüel bias analizi; GDZ'de sıcaklık/GHI feature vurgusu korunur. GDZ ensemble hâlâ
-   eşit-ağırlık — segment ağırlıklandırmadan (2c) en çok GDZ kazanacak.
+2. ✅ **ADM: haftalık-profil vurgusu (lag168 hipotezi) — TEST EDİLDİ, REDDEDİLDİ** (2026-07-13):
+   - Feature importance (ADM XGB weekend/Sunday modeli, `models/live_xgboost_we.json`): `Lag24h` en
+     önemli feature (2.44M gain), `Lag168h` çok daha düşük (9. sırada, 222K gain) — model Pazar'ı
+     tahmin ederken Cumartesi'nin (dün) desenine geçen Pazar'dan daha çok güveniyor. Bu, "haftalık
+     profil daha belirleyici olmalı" hipotezini destekler gibi göründü.
+   - **Walkforward A/B ile test edildi** (`experiments/adm_pazar_lag168_blend_ab.py`): 4 tarihsel Pazar
+     (2026-06-14/21/28, 07-05), `asof_regen.regen_one()` ile GERÇEK dosyalara dokunmadan (tam sandbox,
+     günlük-yeniden-eğitilmiş modellerle as-of üretim) REGEN tahminleri üretildi; `pred_final = α·model +
+     (1-α)·lag168_actual` grid search (α=0.0..1.0).
+   - **SONUÇ: HİPOTEZ REDDEDİLDİ.** Baseline (mevcut model) MAPE=%4.80, naive lag168 MAPE=%7.87 — α
+     azaldıkça (lag168 ağırlığı arttıkça) MAPE monotonik kötüleşiyor, en iyi α=1.0 (blend YOK). Gün
+     bazında naive_lag168 çok değişken (%2.63 – %17.41) — bazı Pazarlar iyi, bazıları çok kötü; model
+     tutarlı şekilde daha iyi. **Canlıya HİÇBİR DEĞİŞİKLİK ALINMADI** (governance: negatif sonuç →
+     değişiklik yok). Rapor: `output/analysis/ensemble_ab_adm_pazar_lag168_2026-07-13.md` (git-ignored).
+   - **Ders:** feature importance tek başına yanıltıcı olabilir — Lag24h'nin baskın olması modelin kötü
+     olduğu anlamına gelmiyor, aksine Lag24h+diğer feature'ların BİRLİKTE lag168'den daha güçlü bir
+     sinyal ürettiğini gösteriyor. Pazar/hafta sonu split veya feature güçlendirme fikirleri şimdilik
+     rafa kaldırıldı — kanıt yok.
+   - GDZ akşam-piki + sabah-ramp analizi (aşağıdaki madde) tamamlandı; ADM tarafında Pazar sorunu için
+     başka bir hipotez (örn. gerçek 07-12 post-mortem'i actuals_log dolunca) gerekebilir.
+3. ✅ **GDZ: akşam piki + gece profili — rezidüel bias ölçüldü** (2026-07-13, 2a-2 aracıyla):
+   `model_segment_breakdown` ile 10 günlük ME (bias) kırılımı: **evening + night** bloklarında TÜM
+   gün tiplerinde sistematik **under-forecast** (ME −75 ile −215 MWh arası), **morning** bloğunda ise
+   güçlü **over-forecast** (+67 ile +307 MWh). Bu akşam-piki bulgusunu doğruluyor VE önceden
+   bilinmeyen bir "sabah rampası çok erken/dik" desenini ortaya çıkarıyor — muhtemelen aynı ramp-
+   zamanlama sorununun iki ucu. Segment CSV: `output/analysis/model_segment_mape_GDZ.csv`.
+   **Düzeltme (bias-correction) denemesi HENÜZ YAPILMADI** — walkforward A/B ile test edilmeden
+   canlıya girmez (governance). GDZ ensemble hâlâ eşit-ağırlık — segment ağırlıklandırmadan (2c) en
+   çok GDZ kazanacak.
 4. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
    gelir (ADM=haftalık profil ağırlıklı, GDZ=hava ağırlıklı) — Faz 3'teki multi-tenant işinin öncüsü.
 
