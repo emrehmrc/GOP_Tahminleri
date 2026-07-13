@@ -18,6 +18,9 @@ models/*
 !models/stacking_ridge_chronos.joblib
 !models/stacking_meta_model.joblib
 
+# ── Sırlar (SMTP şifresi vb.) ───────────────────────────────────────────────
+.env
+
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc

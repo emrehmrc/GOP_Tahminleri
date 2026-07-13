@@ -61,7 +61,11 @@ run_daily.py            — Main orchestrator (183 lines). 9 pipeline steps + lo
 05_postprocess.py       — Holiday sub + PV bias + bias correction. -> postprocessed.parquet
 06_deliver.py           — Sanity check + Excel output. -> YYYY-MM-DD_forecast.xlsx
 07_report_excel.py      — STLF_LIVE_RAPOR.xlsx (5 tables, ADM+GDZ). Auto append.
-08_diagnostic_html.py   — diagnostic_YYYY-MM-DD.html (Chart.js, 6 tabs). Interactive.
+08_diagnostic_html.py   — diagnostic_YYYY-MM-DD.html (Chart.js, 7 tabs). Thin shell:
+                          maps ADM cols to canonical names, calls src/diagnostic_core.py.
+                          GDZ's own 08_diagnostic_html.py imports the SAME core module
+                          (sys.path trick) — never edit tabs/JS in this file directly,
+                          edit diagnostic_core.py so both EDAS stay identical.
 09_email_report.py      — Email report (SMTP env var). Skipped if not configured.
 ```
 
@@ -78,6 +82,11 @@ adaptive_stacking.py    — Leak-safe adaptive stacking. Event-window switch.
 oof_feedback.py         — OOF history + Chronos fallback detection.
 forecast_logger.py      — Faz 0: forecast/actual parquet log + DuckDB views.
 scorecard.py            — Faz 1: daily MAPE, z-score alerts.
+diagnostic_core.py      — Shared ADM+GDZ diagnostic engine (compute() + render()).
+                          GDZ imports this file directly (path: ../adm live/src).
+                          Single source of truth for the interactive HTML — do not
+                          fork per-EDAS logic here, add canonical-column mapping in
+                          the wrapper (pipeline/08_diagnostic_html.py) instead.
 run_context.py          — Run identity, model archive, config hash.
 holiday_calendar.py     — Turkish holidays 2018-2026. Manual update needed.
 holiday_substitution.py — (789 lines) Holiday blend alpha + profile substitution.
@@ -88,7 +97,7 @@ smart_features.py       — Profile-based lag features.
 thermal_features.py     — Thermal inertia features (A/B/C groups).
 metrics.py              — Canonical calculate_mape().
 common.py               — Shared utilities (add_local_src_path).
-data_scanner.py         — OneDrive CSV scanner (DD.MM folder pattern).
+data_scanner.py         — OneDrive CSV scanner (YYYY.MM/DD; DD.MM legacy fallback).
 t2_post_process.py      — T+2 Ridge correction (currently disabled).
 ```
 
@@ -115,6 +124,14 @@ export_hourly_mape_7d.py— DuckDB -> Excel export.
 perfect_prog_rerun.py   — Perfect-prog weather rerun.
 backfill_logs.py        — Forecast log backfill from archive.
 ```
+
+### tests/ (pipeline koruma testleri — yeni)
+```
+tests/test_pipeline_core.py — 21 test: split, lag, ensemble, bias, csv, config, recency, dropna.
+```
+- ADM: `cd [adm live] && pytest tests/ -v` (21 test)
+- GDZ: `cd [gdz live] && pytest tests/ -v` (14 test)
+- Pipeline degisikligi öncesi/sonrasi test PASS olmali
 
 ---
 
@@ -171,12 +188,14 @@ ENABLE_RECENCY_WEIGHTING  = True  # Exponential decay with halflife=60 days
 ENABLE_GBDT_REFIT         = True  # Early stop -> 100% data refit
 ```
 
-### Ensemble
+### Ensemble (ADM)
 ```python
-CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.40, "LGBM_Pred": 0.10, "CHRONOS_Pred": 0.50}
+CALIBRATED_ENSEMBLE_WEIGHTS = {"XGB_Pred": 0.40, "LGBM_Pred": 0.10, "CAT_Pred": 0.05, "CHRONOS_Pred": 0.45}
 ENSEMBLE_BIAS_CORRECTION_T1_MWH = 10  # T+1: +10 MWh
 ENSEMBLE_BIAS_CORRECTION_T2_MWH = 15  # T+2: +15 MWh
 # Weekend/sunday bias scaled: cumartesi T+2*0.20, pazar T+2*0.50
+# OOF birikince Rolling Ridge (Tier 1), yoksa Inverse-MAPE (Tier 1b),
+# sonra kalibre statik agirlik (Tier 2), frozen stacker (3), mean (4).
 ```
 
 ### CAT HPO
@@ -226,10 +245,24 @@ Chronos requires ~4GB RAM. If crashes persist, disable Chronos and rebalance wei
 ### P5: 03_build_features NaN guard fails after data changes
 **Symptom**: `NaN cells in training data` even after fix_weather_history.
 **Root cause**: `_suppress_dropna()` monkey-patch was previously a full `noop` —
-it preserved ALL NaN rows including training rows. Current `_smart_dropna()` correctly
+it preserved ALL NaN rows including training rows. Current `_smart_dropna_patch()` correctly
 drops training NaN but keeps forecast rows. If new feature engineering introduces NaN,
 this fails.
 **Diagnostic**: Check `feature_df.loc[train_mask].isna().sum().sum()` after step 03.
+
+### P6: GDZ ensemble weights vs actual skill misalignment
+**Symptom**: GDZ under-prediction continues even after bias correction.
+**Root cause**: GDZ ensemble weights ({LGBM: 0.27, XGB: 0.27, CAT: 0.24, CHRONOS: 0.22}) are
+from 90-day backtest. If recent model skill has shifted, rolling inverse-MAPE becomes stale
+until enough live log data accumulates (`ROLLING_WEIGHT_MIN_ROWS = 14*24`).
+**Fix**: Check `src/ensemble_weights.py` weight source in log. If "default" persists beyond
+14 days, verify forecast_log population. Reset: `Remove-Item $env:LOCALAPPDATA/gdz_live_logs/monitoring.duckdb`.
+
+### P7: ADM Inverse-MAPE activates before Rolling Ridge
+**Symptom**: Log shows "Inverse-MAPE adaptive" but no "Rolling Ridge".
+**Root cause**: Rolling Ridge requires `ROLLING_RIDGE_MIN_SAMPLES=168` clean OOF samples.
+Until then, Tier 1b (inverse-MAPE) runs. This is by design — adaptive but more conservative.
+**Diagnostic**: Check OOF history size: `len(pd.read_parquet('data/oof_history.parquet'))`.
 
 ---
 
@@ -255,6 +288,12 @@ python run_daily.py                       # normal
 python run_daily.py --skip-weather        # use cached weather
 python run_daily.py --skip-ingest         # skip data ingestion
 python run_daily.py --dry-run             # steps 01-03 only
+
+# Unit tests (ADM — 21 test)
+python -m pytest tests/ -v
+
+# Unit tests (GDZ — 14 test)
+python -m pytest ../"gdz talep/live/tests"/ -v
 ```
 
 ---
@@ -264,6 +303,12 @@ python run_daily.py --dry-run             # steps 01-03 only
 - **Location**: `../gdz talep/live/` relative to this repo
 - **Config**: `config_live_gdz.py` (GDZ_MASTER_PARQUET, own constants)
 - **Station naming**: IZMIR_*, MANISA_* (not MUGLA/DENIZLI/AYDIN)
+- **GDZ improvements (2026-07-10)**:
+  - **Bias correction**: Added ensemble bias correction (haftaici T1=+10, T2=+15 MWh,
+    cumartesi 0.30x, pazar 0.00x). ADM'den port edildi — ME=-42 MWh under-prediction fix'i.
+  - **Recency weighting**: `ENABLE_RECENCY_WEIGHTING=True`, halflife=60g. GBDT eğitiminde
+    sample_weight olarak uygulanır (ADM parity).
+  - **Tests**: `tests/test_gdz_core.py` — 14 test (bias, config, recency, postprocess).
 - **Integration points**:
   - `07_report_excel.py` — tries to import config_live_gdz dynamically
   - `ui/common.py` — runs GDZ pipeline via subprocess (sys.modules collision avoidance)
@@ -278,13 +323,14 @@ python run_daily.py --dry-run             # steps 01-03 only
 
 | Issue | Severity | Status |
 |-------|----------|--------|
-| CAT MAPE ~6.9% (should be ~4-5%) | HIGH | FIXING (RMSE+low_reg helped but not enough) |
-| GDZ model under-prediction (~10% MAPE vs last week) | HIGH | DIAGNOSING (weather sensitivity or config issue) |
-| Chronos session crash -> XGB double-count | MEDIUM | WORKAROUND (check chronos_ok in log) |
+| CAT MAPE ~5.4% (35g backtest) vs Chronos 4.5% (best) | MEDIUM | WATCH (CAT weight=0.05 korunuyor; segment edge var) |
+| GDZ model under-prediction (~10% MAPE) | HIGH | FIXED (bias correction eklendi 2026-07-10) |
+| Chronos session crash -> XGB double-count | MEDIUM | WORKAROUND (rolling inverse-MAPE + renormalize fix) |
 | Holiday calendar needs 2027+ entries | MEDIUM | TODO (manual update in holiday_calendar.py) |
 | Hardcoded GDZ paths with username | LOW | KNOWN (07_report_excel.py) |
-| No unit tests (0 test files) | LOW | TODO |
+| No unit tests (0 test files) | DONE | 35 test (ADM 21 + GDZ 14) |
 | stacking_manager.py 1369 lines | LOW | REFACTOR CANDIDATE |
+| GDZ holiday/PV post-process kapali | MEDIUM | TODO (lookup tablolari gerekli) |
 
 ---
 
