@@ -1,16 +1,25 @@
 # STLF Live — Backend "Ürünleştirme" Master Planı (rev2, 2026-07-13)
 
+## ⏸️ DURDURULDU (2026-07-13) — kalan işler Emre'ye devredildi
+
+Kullanıcı kararı: bu backend "ürünleştirme" çalışması bu oturumla birlikte durduruluyor, kalan tüm
+fazlar (2'nin kalanı, 3'ün kalanı, 4 zaten, 5, 6) Emre Hangül'e devrediliyor. Bu, yeni bir "backend
+oturumu" başlatma isteği gelmedikçe bu plan üzerinde daha fazla iş YAPILMAYACAK anlamına gelir.
+**Kapanış durumu temiz:** commit edilmemiş/yarım hiçbir değişiklik yok, `pytest tests/` 67/67 yeşil,
+son commit `9c732ce`. Aşağıdaki faz tablosu son durumu gösteriyor — bir sonraki oturum (Emre ya da
+başka biri) buradan devam edebilir.
+
 ## Faz Durumu
 
 | Faz | Konu | Durum |
 |-----|------|-------|
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
-| 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
-| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a+2b tamam, 2c kısmen — segment ağırlık scaffolding, canlı bağlantı OOF verisi birikince) |
-| 3 | Multi-tenant çekirdek | 🔶 sürüyor 2026-07-13 (07/08 zaten ortaktı, doğrulandı; 06 ortaklaştırıldı) |
+| 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) — DEVREDİLDİ |
+| 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 2026-07-13 (2a+2b tamam, 2c kısmen — segment ağırlık scaffolding, canlı bağlantı OOF verisi birikince) — DEVREDİLDİ |
+| 3 | Multi-tenant çekirdek | 🔶 2026-07-13 (07/08 zaten ortaktı; 06+05 ortaklaştırıldı, diff=0 doğrulandı; kalan: 01→03/04) — DEVREDİLDİ |
 | 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ❌ kapsam dışı (2026-07-13, Emre yapacak) |
-| 5 | Hijyen + dokümantasyon | ⬜ |
-| 6 | Otomasyon | ⬜ |
+| 5 | Hijyen + dokümantasyon | ⬜ — DEVREDİLDİ |
+| 6 | Otomasyon | ⬜ — DEVREDİLDİ |
 
 ## Context
 
