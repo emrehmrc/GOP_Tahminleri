@@ -6,6 +6,7 @@ Kopyalanan src/ modülleri (config_live.py'den import eder) ile çalışır.
 """
 
 import os
+import sys
 from pathlib import Path
 
 # ── Dizin yapısı ──────────────────────────────────────────────────────────────
@@ -18,6 +19,14 @@ OUTPUT_DIR       = LIVE_DIR / "output"
 ARCHIVE_DIR      = OUTPUT_DIR / "archive"
 LOGS_DIR         = LIVE_DIR / "logs"
 SRC_DIR          = LIVE_DIR / "src"
+
+# DELIVERY_ROOT config_live uzerinden re-export edilir (src.output_paths'ten
+# dogrudan degil) — asof_regen.py'nin sandbox mekanizmasi SADECE config_live
+# niteliklerini yonlendirebiliyor (bkz. asof_regen._REDIRECT_ATTRS); 06_deliver.py
+# bunu `from config_live import DELIVERY_ROOT` ile okudugu icin regen sirasinda
+# sandboxed degere duser, gercek musteri teslim klasorune asla yazmaz.
+sys.path.insert(0, str(SRC_DIR))
+from output_paths import DELIVERY_ROOT  # noqa: E402
 
 OOF_HISTORY_PATH = DATA_DIR / "oof_history.parquet"
 
@@ -41,7 +50,7 @@ LOG_BACKUP_DIR     = LOGS_DIR / "backup"                # OneDrive altı — gü
 
 # ── daily_scorecard (Faz 1) ────────────────────────────────────────────────────
 # Tasarım: stlf_faz1_scorecard_tasarim.md §1 (K1-K5).
-HEADLINE_HORIZON            = "T+2"    # 06_deliver'ın müşteriye teslim ettiği gün (roadmap §1.1)
+HEADLINE_HORIZON            = "T+2"    # kullanıcı tercihi: izleme/alarm hep T+2 (roadmap §1.1)
 SCORECARD_REBUILD_WINDOW_DAYS = 400    # her run'da trailing kaç gün yeniden hesaplanır
 SCORECARD_WINDOWS           = (7, 30, 365)   # window_report pencereleri
 Z_THRESHOLD                 = 3.0      # robust_z alarm eşiği
@@ -54,7 +63,7 @@ WEATHER_HISTORY_PARQUET = DATA_DIR / "weather_history.parquet"
 WEATHER_FC_PARQUET = DATA_DIR / "weather_cache" / "weather_fc_live.parquet"
 FEATURE_MATRIX_PATH = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
 
-# ── Günlük veri kaynağı (OneDrive DD.MM subfolder yapısı) ─────────────────────
+# ── Günlük veri kaynağı (OneDrive YYYY.MM/DD subfolder yapısı) ────────────────
 LIVE_DATA_DIR = LIVE_DIR.parent.parent.parent / "02_Alınan Veriler" / "gdz-adm live" / "talep"
 
 # ── Hedef kolon (Boray'dan birebir aynı) ─────────────────────────────────────
@@ -252,7 +261,7 @@ WEATHER_STATIONS = {
 WEATHER_GHI_WEIGHTS = {"MUGLA": 0.25, "DENIZLI": 0.40, "AYDIN": 0.35}
 
 # ── Çıktı ──────────────────────────────────────────────────────────────────────
-OUTPUT_FILENAME_TEMPLATE = "{date}_forecast.xlsx"
+OUTPUT_FILENAME_TEMPLATE = "ADM_forecast_{date}.xlsx"
 
 # ── Arşivlenecek / hash'lenecek artefaktlar (Faz -1) ──────────────────────────
 # Günlük yeniden eğitilen modeller: her run archive/<run_id>/'a kopyalanır (~7.5 MB).
@@ -277,3 +286,27 @@ FROZEN_ARTEFACTS = [
 ]
 # Donmuş ama büyük (git dışı) — reprodüksiyon için sadece manifest'e hash/mtime.
 CHRONOS_ADAPTER_DIR = MODELS_DIR / "chronos_lora_turkforecast"
+
+# ── Faz 2 (monitoring refactor, 2026-07-10): ortak monitoring/ paketi için ────
+# TenantConfig instance'ı — src/forecast_logger.py ve src/scorecard.py bunu
+# monitoring.forecast_logger / monitoring.scorecard'a parametre olarak geçirir.
+from monitoring.tenant_config import TenantConfig  # noqa: E402
+
+TENANT = TenantConfig(
+    edas_id=EDAS_ID,
+    logger_name="adm_live",
+    log_root=LOG_ROOT,
+    archive_dir=ARCHIVE_DIR,
+    weather_history_parquet=WEATHER_HISTORY_PARQUET,
+    known_events_csv=KNOWN_EVENTS_CSV,
+    alerts_dir=ALERTS_DIR,
+    log_backup_dir=LOG_BACKUP_DIR,
+    weather_station_temp_cols=[f"{s}_app_temp_actual" for s in WEATHER_STATIONS],
+    horizon_day_label_offset=0,   # ADM: horizon_days=1 -> "T+1" (dogrudan)
+    z_baseline_window_days=Z_BASELINE_WINDOW_DAYS,
+    z_warmup_min_days=Z_WARMUP_MIN_DAYS,
+    z_threshold=Z_THRESHOLD,
+    scorecard_rebuild_window_days=SCORECARD_REBUILD_WINDOW_DAYS,
+    scorecard_windows=SCORECARD_WINDOWS,
+    headline_horizon=HEADLINE_HORIZON,
+)

@@ -1,7 +1,7 @@
 """
 01_ingest_actual.py — Müşteri Gerçekleşme Verisi İngest (ADM/Aydem)
 =====================================================================
-LIVE_DATA_DIR / DD.MM / DemandaBereket_Aydem_Daily.csv dosyasını okur,
+LIVE_DATA_DIR / YYYY.MM / DD / DemandaBereket_Aydem_Daily.csv dosyasını okur,
 doğrular, master.parquet'e upsert eder.
 
 Format:

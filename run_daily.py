@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 sys.path.insert(0, str(ROOT / "src"))
 from run_context import start_run, archive_models, prune_archive, write_summary
-from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip
+from forecast_logger import write_forecast_log, rebuild_duckdb_views, backup_logs_zip, reconcile
 from scorecard import build_daily_scorecard, check_alerts
 
 # ── Loglama ───────────────────────────────────────────────────────────────────
@@ -126,6 +126,19 @@ def main():
         except Exception as e:
             log.warning(f"Forecast log yazımı hatası (teslimi etkilemez): {e}")
 
+        # Faz 3 (monitoring refactor, 2026-07-11): heal (Faz 1, arşivden
+        # idempotent boşluk onarımı) + tamlık kontrolü tek çağrıda. Heal
+        # arşivi OLAN boşlukları sessizce doldurur; reconcile() üstüne "arşivi
+        # de yok" (gerçek kayıp) durumunu logs/gaps/<date>.json'a yazıp
+        # görünür kılar — sessiz log.warning yerine.
+        try:
+            summary["steps"]["reconcile"] = reconcile()
+            n_gaps = len(summary["steps"]["reconcile"].get("gaps", []))
+            if n_gaps:
+                log.warning(f"[Reconcile] {n_gaps} hücre gerçek kayıp -> logs/gaps/")
+        except Exception as e:
+            log.warning(f"Reconcile (heal+tamlık) hatası (teslimi etkilemez): {e}")
+
         # Faz 1: daily_scorecard + alarm kontrolü. (Eski `log_daily_mape` kümülatif
         # MAPE'si — teknik borç #2, roadmap §1.4 — kaldırıldı; yerini scorecard aldı.)
         try:
@@ -135,13 +148,6 @@ def main():
         except Exception as e:
             log.warning(f"Scorecard/alarm hatası (teslimi etkilemez): {e}")
 
-        # Adım 07 — STLF LIVE RAPOR (Excel, her run sonrası güncellenir)
-        try:
-            result07 = run_step("07_REPORT", _step_import("07_report_excel").run)
-            summary["steps"]["07_report"] = result07
-        except Exception as e:
-            log.warning(f"STLF Rapor hatası (teslimi etkilemez): {e}")
-
         # Adım 08 — STLF DIAGNOSTIC HTML (Chart.js gösterge paneli)
         try:
             result08 = run_step("08_DIAGNOSTIC", _step_import("08_diagnostic_html").run)
@@ -149,15 +155,14 @@ def main():
         except Exception as e:
             log.warning(f"Diagnostic HTML hatası (teslimi etkilemez): {e}")
 
-        # Adım 09 — Email rapor (SMTP ayarları yapılandırılmışsa)
-        try:
-            result09 = run_step("09_EMAIL", _step_import("09_email_report").run)
-            summary["steps"]["09_email"] = result09
-        except Exception as e:
-            log.warning(f"Email rapor hatası (teslimi etkilemez): {e}")
-
-        summary["status"] = "ok"
-        log.info(f"\n✓ Pipeline tamamlandı. Teslim: {result06.get('output_file', '?')}")
+        # Adım 09 — Email: KASITLI OLARAK OTOMATIK ATILMAZ (2026-07-10).
+        # Musteri teslimi artik insan onayina bagli: pipeline burada "onay
+        # bekliyor" durumunda biter; email yalnizca kullanici UI'da
+        # "Musteriye Gonder" butonuna basinca gonderilir
+        # (bkz. ui/tab_tahmin_uret.py + pipeline/09_email_report.py).
+        summary["status"] = "awaiting_approval"
+        log.info(f"\n✓ Pipeline tamamlandı (email onay bekliyor). "
+                 f"Teslim: {result06.get('output_file', '?')}")
 
     except Exception:
         summary["status"] = "error"

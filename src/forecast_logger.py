@@ -1,13 +1,24 @@
 """
-forecast_logger.py — Faz 0 Loglama Katmanı
-=============================================
+forecast_logger.py — ADM ince shim (Faz 2, 2026-07-10)
+=============================================================
 Şema kaynağı: stlf_forecast_log_tasarim.md §2 (forecast_log), §3 (actuals_log).
-Kilitli kararlar (§6): her düzeltme adımı ayrı delta; known_event CSV; perfect-prog
-mümkün (weather_history = gerçekleşme); DuckDB (parquet üzerinde view, türetilmiş);
-günlük partition.
 
-Depo: config_live.FORECAST_LOG_DIR / ACTUALS_LOG_DIR (OneDrive DIŞI, %LOCALAPPDATA%).
-MONITORING_DB tamamen türetilmiş — silinip parquet'ten rebuild edilebilir.
+Paylaşımlı mantık (rebuild_duckdb_views, heal_forecast_log_gaps, schema,
+compute_calendar_fields, upsert yardımcıları, backup) artık
+monitoring/forecast_logger.py'de yaşıyor (ADM+GDZ ortak — bkz. o paketin
+docstring'i). Burada SADECE ADM'ye ÖZGÜ kalan iki şey var:
+
+  1. write_forecast_log() — postprocessed_predictions.parquet'in ADM'ye özgü
+     kolon şeması (XGB_Pred/LGBM_Pred doğrudan, GDZ'nin T1/T2 ayrı-kolon
+     coalesce'i YOK) + raw_predictions_meta.json/manifest.json sidecar'ları.
+  2. update_actuals_log() / update_actuals_log_weather() — ADM'nin
+     Tarih+Saat ayrı kolon şeması (GDZ'de tekil Tarih datetime).
+
+Diğer her şey (FORECAST_LOG_SCHEMA, _write_typed_parquet, _forecast_log_path,
+compute_calendar_fields, rebuild_duckdb_views, heal_forecast_log_gaps,
+backup_logs_zip) monitoring/'den re-export edilir — eski çağıranlar
+(backfill_logs.py, asof_regen.py, perfect_prog_rerun.py, run_daily.py,
+ui/tab_tahmin_uret.py) HİÇBİR DEĞİŞİKLİK gerektirmez, imzalar birebir aynı.
 
 Çağrı sırası:
   04_predict_48h  -> compute_calendar_fields(), compute_horizon_fields() (yardımcı)
@@ -20,7 +31,6 @@ MONITORING_DB tamamen türetilmiş — silinip parquet'ten rebuild edilebilir.
 from __future__ import annotations
 
 import json
-import shutil
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -28,10 +38,10 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 import config_live as C
+from monitoring import forecast_logger as _shared
+from monitoring.schema import FORECAST_LOG_SCHEMA, ACTUALS_LOG_SCHEMA
 
 log = logging.getLogger("adm_live")
 
@@ -46,126 +56,44 @@ POSTPROC_PATH = DATA_DIR / "weather_cache" / "postprocessed_predictions.parquet"
 
 WEATHER_STATION_TEMP_COLS = [f"{s}_app_temp_actual" for s in C.WEATHER_STATIONS]
 
-# ── pyarrow şemaları (stlf_forecast_log_tasarim.md §2 / §3 birebir) ───────────
-
-FORECAST_LOG_SCHEMA = pa.schema([
-    ("edas_id", pa.string()),
-    ("run_id", pa.string()),
-    ("config_hash", pa.string()),
-    ("issue_ts", pa.timestamp("us")),
-    ("target_ts", pa.timestamp("us")),
-    ("target_date", pa.string()),
-    ("horizon_day", pa.string()),          # "T+1" / "T+2"
-    ("lead_time_h", pa.int32()),
-    # Alt-model ham tahminleri
-    ("y_pred_xgb", pa.float64()),
-    ("y_pred_lgbm", pa.float64()),
-    ("y_pred_cat", pa.float64()),
-    ("y_pred_chronos", pa.float64()),
-    ("cat_present", pa.bool_()),
-    ("chronos_ok", pa.bool_()),
-    # Stacking / meta katman
-    ("y_pred_ens_raw", pa.float64()),
-    ("meta_method", pa.string()),
-    ("meta_w_xgb", pa.float64()),
-    ("meta_w_lgbm", pa.float64()),
-    ("meta_w_cat", pa.float64()),
-    ("meta_w_chronos", pa.float64()),
-    ("meta_intercept", pa.float64()),
-    # Düzeltme zinciri
-    ("override_active", pa.bool_()),
-    ("override_delta", pa.float64()),
-    ("subst_active", pa.bool_()),
-    ("subst_delta", pa.float64()),
-    ("pv_bias_delta", pa.float64()),
-    ("y_pred_final", pa.float64()),
-    # Kullanılan dış girdiler
-    ("wx_temp_fcst", pa.float64()),
-    ("wx_ghi_fcst", pa.float64()),
-    # Takvim & segment
-    ("day_type", pa.string()),
-    ("flag_holiday", pa.bool_()),
-    ("flag_bridge", pa.bool_()),
-    ("flag_ramadan", pa.bool_()),
-    # Sürüm & tekrarlanabilirlik
-    ("model_versions", pa.string()),        # json
-    ("feature_snapshot_ref", pa.string()),
-])
-
-ACTUALS_LOG_SCHEMA = pa.schema([
-    ("edas_id", pa.string()),
-    ("target_ts", pa.timestamp("us")),
-    ("target_date", pa.string()),
-    ("y_actual", pa.float64()),
-    ("wx_temp_actual", pa.float64()),
-    ("wx_ghi_actual", pa.float64()),
-    ("data_quality_flag", pa.string()),
-    ("known_event", pa.string()),
-])
+# ── Paylaşımlı katmandan re-export (geriye-uyumluluk — çağıranlar değişmedi) ───
+_write_typed_parquet = _shared._write_typed_parquet
+compute_calendar_fields = _shared.compute_calendar_fields
+derive_data_quality_flags = _shared.derive_data_quality_flags
 
 
-def _empty_frame(schema: pa.Schema) -> pd.DataFrame:
-    return schema.empty_table().to_pandas()
+def _forecast_log_path(edas_id: str, target_date: str, run_id: str) -> Path:
+    return _shared._forecast_log_path(C.TENANT, target_date, run_id)
 
 
-def _write_typed_parquet(df: pd.DataFrame, schema: pa.Schema, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df = df.reindex(columns=[f.name for f in schema])
-    table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
-    pq.write_table(table, path)
+def _upsert_by_date(edas_id: str, updates: pd.DataFrame) -> int:
+    return _shared.upsert_by_date(C.TENANT, updates)
+
+
+def _upsert_actuals(edas_id: str, target_date: str, updates: pd.DataFrame) -> None:
+    _shared.upsert_actuals(C.TENANT, target_date, updates)
+
+
+def rebuild_duckdb_views() -> dict:
+    return _shared.rebuild_duckdb_views(C.TENANT)
+
+
+def heal_forecast_log_gaps(edas_id: Optional[str] = None) -> dict:
+    return _shared.heal_forecast_log_gaps(C.TENANT)
+
+
+def backup_logs_zip(keep_days: int = 30) -> Path:
+    return _shared.backup_logs_zip(C.TENANT, keep_days)
+
+
+def reconcile() -> dict:
+    """Faz 3: heal + tamlık kontrolü. Gerçek kayıp (arşiv de yok) varsa
+    logs/gaps/<date>.json'a yazar (bkz. monitoring/reconcile.py)."""
+    from monitoring.reconcile import reconcile as _reconcile
+    return _reconcile(C.TENANT)
 
 
 # ── Yardımcılar: 04'ün ürettiği calendar/horizon alanları ─────────────────────
-
-def compute_calendar_fields(idx: pd.DatetimeIndex) -> pd.DataFrame:
-    """day_type / flag_holiday / flag_bridge / flag_ramadan — 04'te ÇAĞRILIRKEN
-    `deliver_idx` (DataManager'ın kendi DatetimeIndex'i) DEĞİL, Tarih+Saat'ten
-    yeniden kurulan gerçek `target_ts` verilmeli.
-
-    DİKKAT (bulundu, düzeltildi): DataManager'ın kendi index'i Saat=0 satırlarında
-    bir gün İLERİ kayıyor (eski "hour-ending" konvansiyonu kalıntısı — bkz.
-    03_build_features.py:_backfill_calendar_columns'daki aynı gözlem). feature_df'in
-    KENDİ Yilbasi/Milli_Bayram/Is_Ramadan kolonları da bu kaymış index'e göre
-    hizalı olduğundan, onlara güvenmek yerine takvimi doğrudan statik
-    holiday_calendar tablosundan (Datetime'dan bağımsız, saf tarih hesabı)
-    türetiyoruz — target_ts ile her koşulda tutarlı kalır.
-
-    day_type kategorileri (roadmap §2.2): hafta_ici / cumartesi / pazar /
-    hafta_ici_tatil / hafta_sonu_tatil.
-    """
-    from src.holiday_calendar import build_holiday_calendar, classify_de_facto_bridge_day, BRIDGE_DATES
-
-    years = list(range(idx.year.min() - 1, idx.year.max() + 2))
-    cal = build_holiday_calendar(years)
-
-    flag_holiday, flag_bridge, flag_ramadan = [], [], []
-    for ts in idx:
-        d = ts.date()
-        meta = cal.get(d)
-        flag_holiday.append(meta is not None and meta["holiday_type"] in ("religious", "official"))
-        flag_ramadan.append(meta is not None and meta["holiday_type"] == "ramadan_period")
-        flag_bridge.append(d in BRIDGE_DATES or classify_de_facto_bridge_day(d) is not None)
-
-    flag_holiday = np.array(flag_holiday)
-    flag_ramadan = np.array(flag_ramadan)
-    flag_bridge = np.array(flag_bridge)
-
-    dow = idx.dayofweek.to_numpy()
-    day_type = np.where(
-        flag_holiday & (dow < 5), "hafta_ici_tatil",
-        np.where(
-            flag_holiday & (dow >= 5), "hafta_sonu_tatil",
-            np.where(dow == 5, "cumartesi", np.where(dow == 6, "pazar", "hafta_ici"))
-        )
-    )
-
-    return pd.DataFrame({
-        "day_type": day_type,
-        "flag_holiday": flag_holiday,
-        "flag_bridge": flag_bridge,
-        "flag_ramadan": flag_ramadan,
-    }, index=idx)
-
 
 def compute_horizon_fields(idx: pd.DatetimeIndex, issue_ts: datetime, test_size: int) -> pd.DataFrame:
     """horizon_day (T+1/T+2) + lead_time_h — is_t2 maskesi 05'teki ile aynı (TEST_SIZE//2)."""
@@ -176,32 +104,39 @@ def compute_horizon_fields(idx: pd.DatetimeIndex, issue_ts: datetime, test_size:
     return pd.DataFrame({"horizon_day": horizon_day, "lead_time_h": lead_time_h}, index=idx)
 
 
-# ── forecast_log yazımı ────────────────────────────────────────────────────────
+# ── forecast_log yazımı (ADM'ye özgü — postprocessed_predictions.parquet kolon şeması) ──
 
-def _forecast_log_path(edas_id: str, target_date: str, run_id: str) -> Path:
-    return (C.FORECAST_LOG_DIR / f"edas_id={edas_id}" / f"target_date={target_date}"
-            / f"run_{run_id}.parquet")
-
-
-def write_forecast_log(ctx: dict) -> dict:
+def write_forecast_log(ctx: dict, postproc_path: Optional[Path] = None,
+                        meta_path: Optional[Path] = None, source: str = "live") -> dict:
     """postprocessed_predictions.parquet + raw_predictions_meta.json sidecar + manifest.json
     -> forecast_log parquet (target_date başına partition, 06'dan sonra çağrılır).
 
     Girdi kolonları 04/05 tarafından üretilir (bkz. dosya başlığı). Eksikse
     (henüz enstrümante edilmemiş run) NaN/None ile doldurulur — sessizce atlanmaz,
     ama pipeline'ı bozmaz.
+
+    `postproc_path`/`meta_path`: varsayılan (None) gerçek canlı yolları (POSTPROC_PATH/
+    RAW_PREDICTIONS_META_PATH) okur — normal `run_daily.py`/UI çağrısı budur. Sandbox'lı
+    bir regen'den (asof_regen.regen_one) gelen sonuçları loglarken (bkz. backtest_walkforward.py)
+    çağıran bu regen'e ait *_models_REGEN.parquet/*_meta_REGEN.json yollarını AÇIKÇA vermeli —
+    aksi halde bu fonksiyon o an diskteki GERÇEK (regen'le ilgisiz, bayat) postproc/meta'yı
+    okur ve forecast_log'a yanlış tahmin/ağırlık yazar (bu bug'ın canlıya sızmadan
+    bulunup düzeltildiği yer: STLF_MONITORING_REFACTOR_PLAN.md §6 Faz 4).
     """
-    if not POSTPROC_PATH.exists():
+    postproc_path = postproc_path or POSTPROC_PATH
+    meta_path = meta_path or RAW_PREDICTIONS_META_PATH
+
+    if not postproc_path.exists():
         return {"status": "no_postproc"}
 
-    df = pd.read_parquet(POSTPROC_PATH)
+    df = pd.read_parquet(postproc_path)
     if "Datetime" not in df.columns:
         return {"status": "no_datetime_col"}
     df["Datetime"] = pd.to_datetime(df["Datetime"])
 
     meta = {}
-    if RAW_PREDICTIONS_META_PATH.exists():
-        meta = json.loads(RAW_PREDICTIONS_META_PATH.read_text(encoding="utf-8"))
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
     manifest = {}
     manifest_path = C.MODEL_ARCHIVE_DIR / ctx["run_id"] / "manifest.json"
@@ -214,6 +149,9 @@ def write_forecast_log(ctx: dict) -> dict:
     def col(name, default=None):
         return df[name] if name in df.columns else pd.Series([default] * n, index=df.index)
 
+    issue_date = pd.Timestamp(ctx["issue_date"]).date()
+    horizon_days = (df["Datetime"].dt.date - issue_date).apply(lambda d: d.days).astype("int8")
+
     out = pd.DataFrame({
         "edas_id": ctx["edas_id"],
         "run_id": ctx["run_id"],
@@ -222,6 +160,9 @@ def write_forecast_log(ctx: dict) -> dict:
         "target_ts": df["Datetime"],
         "target_date": df["Datetime"].dt.strftime("%Y-%m-%d"),
         "horizon_day": col("horizon_day"),
+        "issue_date": issue_date,
+        "horizon_days": horizon_days,
+        "source": source,
         "lead_time_h": col("lead_time_h"),
         "y_pred_xgb": col("XGB_Pred"),
         "y_pred_lgbm": col("LGBM_Pred"),
@@ -262,82 +203,7 @@ def write_forecast_log(ctx: dict) -> dict:
     return {"status": "ok", "rows": n_written, "target_dates": sorted(out["target_date"].unique().tolist())}
 
 
-# ── actuals_log: D+1 yük dalgası ───────────────────────────────────────────────
-
-def _actuals_log_path(edas_id: str, target_date: str) -> Path:
-    return C.ACTUALS_LOG_DIR / f"edas_id={edas_id}" / f"target_date={target_date}.parquet"
-
-
-def _load_known_events() -> pd.DataFrame | None:
-    if not C.KNOWN_EVENTS_CSV.exists():
-        return None
-    try:
-        ev = pd.read_csv(C.KNOWN_EVENTS_CSV)
-        if ev.empty:
-            return None
-        ev["ts_start"] = pd.to_datetime(ev["ts_start"])
-        ev["ts_end"] = pd.to_datetime(ev["ts_end"])
-        return ev
-    except Exception as e:
-        log.warning(f"[ActualsLog] known_events.csv okunamadı: {e}")
-        return None
-
-
-def _known_event_for(edas_id: str, ts: pd.Timestamp, events: pd.DataFrame | None) -> Optional[str]:
-    if events is None:
-        return None
-    m = events[(events["edas_id"] == edas_id) & (events["ts_start"] <= ts) & (events["ts_end"] >= ts)]
-    if m.empty:
-        return None
-    return f"{m.iloc[0]['category']}:{m.iloc[0].get('note', '')}"
-
-
-def _upsert_by_date(edas_id: str, updates: pd.DataFrame) -> int:
-    """updates: 'target_ts' dahil her kolon. Tarihe göre partition edip upsert eder.
-
-    DİKKAT: target_date'i her zaman `updates["target_ts"]`'in KENDİSİNDEN türet
-    (dışarıdan ayrı bir Series/array değil). `updates` çoğu zaman `.to_numpy()`
-    ile taze bir RangeIndex'le kurulur; eğer tarih dizisi başka bir (filtrelenmiş,
-    süreksiz index'li) kaynaktan geliyorsa `.assign()`/`groupby` index'e göre
-    hizalar ve TÜM satırlar NaN key'e düşüp sessizce atlanır (canlıda 0 satır
-    yazan bir upsert — bu fonksiyon tam bunu önlemek için var)."""
-    target_date = pd.to_datetime(updates["target_ts"]).dt.strftime("%Y-%m-%d")
-    n = 0
-    for d, part in updates.groupby(target_date):
-        _upsert_actuals(edas_id, d, part)
-        n += len(part)
-    return n
-
-
-def _upsert_actuals(edas_id: str, target_date: str, updates: pd.DataFrame) -> None:
-    """target_ts anahtarıyla upsert: mevcut dosyada olmayan kolonlar korunur."""
-    path = _actuals_log_path(edas_id, target_date)
-    if path.exists():
-        existing = pd.read_parquet(path)
-        existing["target_ts"] = pd.to_datetime(existing["target_ts"])
-        merged = existing.set_index("target_ts")
-        upd = updates.set_index("target_ts")
-        for c in upd.columns:
-            if c not in merged.columns:
-                merged[c] = None
-            merged.loc[upd.index, c] = upd[c]
-        merged = merged.reset_index()
-    else:
-        merged = updates.copy()
-
-    merged["edas_id"] = edas_id
-    merged["target_date"] = target_date
-    _write_typed_parquet(merged, ACTUALS_LOG_SCHEMA, path)
-
-
-def derive_data_quality_flags(target_col: pd.Series) -> pd.Series:
-    """Faz 0 basit kontrol: eksik / sıfır değer işaretle. Detaylı anomali
-    tespiti (spike/flat-line) Faz 1 triyaj kapsamında."""
-    flags = pd.Series("", index=target_col.index, dtype=object)
-    flags[target_col.isna()] = "missing"
-    flags[(target_col == 0) & (~target_col.isna())] = "zero_value"
-    return flags
-
+# ── actuals_log: D+1 yük dalgası (ADM'ye özgü — Tarih+Saat ayrı kolon) ─────────
 
 def update_actuals_log(day_df: pd.DataFrame, edas_id: Optional[str] = None) -> dict:
     """01_ingest_actual'dan çağrılır. day_df: RAW_DATE_COL/RAW_HOUR_COL/RAW_TARGET_COL,
@@ -349,22 +215,22 @@ def update_actuals_log(day_df: pd.DataFrame, edas_id: Optional[str] = None) -> d
 
     target_ts = pd.to_datetime(day_df[RAW_DATE_COL]) + pd.to_timedelta(day_df[RAW_HOUR_COL], unit="h")
     quality = derive_data_quality_flags(day_df[RAW_TARGET_COL])
-    events = _load_known_events()
+    events = _shared.load_known_events(C.TENANT)
 
     updates = pd.DataFrame({
         "target_ts": target_ts.to_numpy(),
         "y_actual": day_df[RAW_TARGET_COL].to_numpy(),
         "data_quality_flag": quality.to_numpy(),
-        "known_event": [_known_event_for(edas_id, ts, events) for ts in target_ts],
+        "known_event": [_shared.known_event_for(edas_id, ts, events) for ts in target_ts],
     })
 
-    n_written = _upsert_by_date(edas_id, updates)
+    n_written = _shared.upsert_by_date(C.TENANT, updates)
 
     log.info(f"[ActualsLog] {n_written} satır (y_actual) upsert edildi")
     return {"status": "ok", "rows": n_written}
 
 
-# ── actuals_log: hava gerçekleşme dalgası (~D+6) ──────────────────────────────
+# ── actuals_log: hava gerçekleşme dalgası (~D+6, ADM'ye özgü kolon adları) ─────
 
 def update_actuals_log_weather(edas_id: Optional[str] = None, lookback_days: int = 30) -> dict:
     """02_fetch_weather'dan çağrılır. weather_history.parquet'teki dolu (_actual)
@@ -399,82 +265,7 @@ def update_actuals_log_weather(edas_id: Optional[str] = None, lookback_days: int
         "wx_ghi_actual": wx_ghi_actual[has_actual].to_numpy(),
     })
 
-    n_written = _upsert_by_date(edas_id, updates)
+    n_written = _shared.upsert_by_date(C.TENANT, updates)
 
     log.info(f"[ActualsLog] {n_written} satır (wx_actual) upsert edildi")
     return {"status": "ok", "rows": n_written}
-
-
-# ── DuckDB view (türetilmiş) ──────────────────────────────────────────────────
-
-def rebuild_duckdb_views() -> dict:
-    """monitoring.duckdb'yi parquet üzerinden (yeniden) kur. Tamamen türetilmiş —
-    dosya silinip bu fonksiyon tekrar çağrılırsa aynı sonuç elde edilir."""
-    import duckdb
-
-    C.MONITORING_DB.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(C.MONITORING_DB))
-    try:
-        fc_glob = str(C.FORECAST_LOG_DIR / "**" / "*.parquet")
-        ac_glob = str(C.ACTUALS_LOG_DIR / "**" / "*.parquet")
-
-        created = []
-        if any(C.FORECAST_LOG_DIR.rglob("*.parquet")):
-            # Dedup: aynı (edas_id, target_ts, horizon_day) için birden çok run
-            # birikebilir (backfill farklı run_id ile gerçek run'ın üstüne yazmaz).
-            # Her hücrede tek satır bırak; gerçek run'ı backfill'e tercih et
-            # (backfill=true sona düşer), sonra en güncel issue_ts'yi seç. Aksi
-            # halde scorecard, actual geldiğinde gerçek + backfill satırlarını
-            # ortalayıp yanlış MAPE üretir.
-            con.execute(
-                f"CREATE OR REPLACE VIEW forecast_log_v AS "
-                f"SELECT * FROM read_parquet('{fc_glob}', hive_partitioning=1) "
-                f"QUALIFY row_number() OVER ("
-                f"  PARTITION BY edas_id, target_ts, horizon_day "
-                f"  ORDER BY (run_id LIKE '%backfill%') ASC, issue_ts DESC, run_id DESC"
-                f") = 1"
-            )
-            created.append("forecast_log_v")
-        if any(C.ACTUALS_LOG_DIR.rglob("*.parquet")):
-            con.execute(
-                f"CREATE OR REPLACE VIEW actuals_log_v AS "
-                f"SELECT * FROM read_parquet('{ac_glob}', hive_partitioning=1)"
-            )
-            created.append("actuals_log_v")
-    finally:
-        con.close()
-
-    log.info(f"[DuckDB] view'lar kuruldu: {created}")
-    return {"status": "ok", "views": created}
-
-
-# ── Yedekleme (OneDrive'a günlük zip) ─────────────────────────────────────────
-
-def backup_logs_zip(keep_days: int = 30) -> Path:
-    """LOG_ROOT (forecast_log + actuals_log + known_events.csv — DuckDB HARİÇ,
-    türetilmiş) için günlük zip -> logs/backup/ (OneDrive altı, git-ignored)."""
-    C.LOG_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = date.today().isoformat()
-    dest_base = C.LOG_BACKUP_DIR / f"adm_logs_{stamp}"
-
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        if C.FORECAST_LOG_DIR.exists():
-            shutil.copytree(C.FORECAST_LOG_DIR, tmp / "forecast_log")
-        if C.ACTUALS_LOG_DIR.exists():
-            shutil.copytree(C.ACTUALS_LOG_DIR, tmp / "actuals_log")
-        if C.KNOWN_EVENTS_CSV.exists():
-            shutil.copy2(C.KNOWN_EVENTS_CSV, tmp / "known_events.csv")
-        zip_path = shutil.make_archive(str(dest_base), "zip", root_dir=str(tmp))
-
-    for f in C.LOG_BACKUP_DIR.glob("adm_logs_*.zip"):
-        try:
-            d = date.fromisoformat(f.stem.replace("adm_logs_", ""))
-        except ValueError:
-            continue
-        if (date.today() - d).days > keep_days:
-            f.unlink(missing_ok=True)
-
-    log.info(f"[Backup] {zip_path}")
-    return Path(zip_path)

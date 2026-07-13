@@ -5,8 +5,9 @@
 tümünü arşivler.
 
 Giriş:  data/weather_cache/postprocessed_predictions.parquet
-Çıkış:  output/<YYYY-MM-DD>_forecast.xlsx   (müşteri teslim dosyası)
-         output/archive/<YYYY-MM-DD>_full.parquet  (tüm 48h arşiv)
+Çıkış:  <DELIVERY_ROOT>/YYYY.MM/D/<YYYY-MM-DD>_forecast.xlsx  (müşteri teslim dosyası,
+         proje dışı paylaşılan klasör — bkz. src/output_paths.DELIVERY_ROOT)
+         output/archive/<YYYY-MM-DD>_full.parquet  (tüm 48h arşiv, yerel)
 
 NOT: Müşteri formatı şu an "basit sade tablo" olarak yazılıyor.
      Faz 3'te gerçek teslim formatına (örnek dosyaya bakarak) güncellenecek.
@@ -22,9 +23,10 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config_live import (
-    DATA_DIR, OUTPUT_DIR, ARCHIVE_DIR, OUTPUT_FILENAME_TEMPLATE,
+    DATA_DIR, ARCHIVE_DIR, OUTPUT_FILENAME_TEMPLATE, DELIVERY_ROOT,
     MASTER_PARQUET, RAW_TARGET_COL, RAW_DATE_COL, RAW_HOUR_COL,
 )
+from src.output_paths import dated_output_path
 
 log = logging.getLogger("adm_live")
 
@@ -84,18 +86,27 @@ def _sanity_check(output_df: pd.DataFrame) -> list:
     return flags
 
 
-def run(target_date: str = None) -> dict:
+def run(target_date: str = None, issue_date: str | date | None = None) -> dict:
     """
     Adım 06 — teslim çıktısı yaz.
 
     Args:
         target_date: "YYYY-MM-DD" formatında teslim günü.
-                     None ise otomatik: bugünden 1 gün sonrası (yarın = T+2).
+                     None ise otomatik: bugünden 1 gün sonrası (yarın).
+        issue_date: bu run'ın MANTIKSAL issue günü — normal canlı run'da
+                     her zaman date.today() ile aynıdır (varsayılan budur).
+                     SADECE asof_regen.py gibi "geçmişteymişiz gibi" çalışan
+                     script'ler için farklı olur (wall-clock date.today() o
+                     script'in GERÇEKTEN çalıştığı gün, simüle ettiği gün
+                     DEĞİL). Arşiv dosyasına issue_date bu parametreden
+                     yazılır — forecast_log rebuild'i bunu güvenilir kaynak
+                     olarak kullanır, dosya adından tahmin etmez.
 
     Returns:
         {"status": "ok", "output_file": "...", "target_date": "...", "n_hours": 24}
     """
     print("\n[06] Müşteri çıktısı hazırlanıyor...")
+    issue_dt = pd.Timestamp(issue_date).date() if issue_date is not None else date.today()
 
     df = pd.read_parquet(POSTPROC_PATH)
 
@@ -142,18 +153,20 @@ def run(target_date: str = None) -> dict:
     else:
         print("     [Sanity] OK")
 
-    # Excel yaz
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Excel yaz — musteri teslimi artik proje disindaki paylasilan klasore gider.
     filename = OUTPUT_FILENAME_TEMPLATE.format(date=target_str)
-    output_path = OUTPUT_DIR / filename
+    output_path = dated_output_path(DELIVERY_ROOT, target_str, filename, create=True)
     output_df.to_excel(output_path, index=False, sheet_name="Tahmin")
     print(f"     Teslim dosyası: {output_path.name}")
 
-    # Tüm 48h arşive yaz
+    # Tüm 48h arşive yaz — issue_date kolonu ACIK yazilir (dosya adindan
+    # tahmin etmeye gerek kalmasin, bkz. forecast_logger.rebuild_forecast_log_from_archives).
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    archive_name = f"{date.today()}_run_{target_str}_full48h.parquet"
+    archive_name = f"{issue_dt}_run_{target_str}_full48h.parquet"
     archive_path = ARCHIVE_DIR / archive_name
-    df.to_parquet(archive_path, index=False)
+    df_archive = df.copy()
+    df_archive["issue_date"] = pd.Timestamp(issue_dt)
+    df_archive.to_parquet(archive_path, index=False)
     print(f"     Arşiv:         {archive_path.name}")
 
     return {
