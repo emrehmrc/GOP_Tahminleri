@@ -227,3 +227,56 @@ def get_rolling_ridge(
 
     print(f"     [Stacker] Rolling Ridge OOF ({len(y)} samples, {lookback_days}d) — cols: {available}")
     return ridge, available
+
+
+def get_inverse_mape_weights(
+    oof_path: Path,
+    pred_cols: list,
+    lookback_days: int = 60,
+    min_days: int = 14,
+) -> Optional[dict]:
+    """
+    OOF history üzerinden inverse-MAPE adaptive weights hesapla.
+    Rolling Ridge için yeterli OOF verisi birikmeden önce (henuz < min_samples)
+    statik weight'ler yerine guncel model performansina dayali agirlik verir.
+
+    Returns: {col: weight} normalize edilmis, veya None (yetersiz veri).
+    """
+    if not oof_path.exists():
+        return None
+    oof = pd.read_parquet(oof_path)
+    if "chronos_fallback" in oof.columns:
+        oof = oof[~oof["chronos_fallback"].fillna(False)].copy()
+    oof["date"] = pd.to_datetime(oof["date"])
+    unique_dates = oof["date"].nunique()
+    if unique_dates < min_days:
+        return None
+
+    cutoff = oof["date"].max() - timedelta(days=lookback_days)
+    recent = oof[oof["date"] >= cutoff].copy()
+    if len(recent) < min_days * 12:
+        recent = oof.copy()
+
+    available = [c for c in pred_cols if c in recent.columns]
+    if len(available) < 2:
+        return None
+
+    mape_by_col = {}
+    for col in available:
+        d = recent[["actual", col]].dropna()
+        if len(d) < 12:
+            continue
+        ape = np.abs((d["actual"] - d[col]) / (d["actual"] + 1e-10)) * 100
+        mape_by_col[col] = float(ape.mean())
+
+    if not mape_by_col:
+        return None
+
+    inv = {m: 1.0 / v for m, v in mape_by_col.items() if v > 0 and np.isfinite(v)}
+    if not inv:
+        return None
+    total = sum(inv.values())
+    weights = {m: w / total for m, w in inv.items()}
+    print(f"     [Stacker] Inverse-MAPE weights ({len(recent)} samples, {unique_dates}d): "
+          f"{ {k: round(v, 3) for k, v in weights.items()} }")
+    return weights
