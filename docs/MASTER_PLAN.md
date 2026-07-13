@@ -332,15 +332,23 @@ en zor, muhtemelen en sona/ayrı bırakılacak).
    dokunmadan) aynı gerçek `postprocessed_predictions.parquet` ile koşturuldu, ADM+GDZ ikisinde de
    `output_df.equals()` ve dönüş sözlüğü birebir eşleşti. `pytest tests/` 67/67 yeşil (davranış değişmedi,
    06_deliver.py'ye özel test yok).
-2. **TenantConfig genişletme:** istasyonlar, hedef kolon, ağırlık/bias sabitleri, path'ler, HPO
+2. ✅ **05 (postprocess) ortaklaştırıldı (2026-07-13):** `src/postprocess_core.py` (yeni) —
+   `apply_ensemble_bias_correction()` fonksiyonu, gün-tipi duyarlı T+1/T+2 bias bloğunu barındırır
+   (ADM+GDZ'de zaten satır satır aynıydı, GDZ'ye 2026-07-10'da ADM'den port edilmişti). Holiday
+   substitution + PV bias katmanları KASITLI OLARAK ortaklaştırılMADI — sadece ADM'de var, GDZ'nin
+   kendi eski bias katmanları A/B'de kötüleşince kapatılmıştı, zorla ortak katman dayatmak olurdu.
+   **Diff=0 doğrulaması:** eski/yeni kod izole scratch `POSTPROC_PATH` ile (gerçek dosyaya
+   dokunmadan) gerçek `raw_predictions.parquet`/`feature_matrix.parquet` ile koşturuldu, ADM+GDZ
+   ikisinde de `df.equals()` ve dönüş sözlüğü birebir eşleşti. `pytest tests/` 67/67 yeşil.
+3. **TenantConfig genişletme:** istasyonlar, hedef kolon, ağırlık/bias sabitleri, path'ler, HPO
    paramları, frozen artefact'lar, (2b-4) feature profili.
-3. **Model registry:** `MODELS = {"xgb": ..., "lgbm": ..., "cat": ..., "chronos": ...}`; `y_pred_{key}`
+4. **Model registry:** `MODELS = {"xgb": ..., "lgbm": ..., "cat": ..., "chronos": ...}`; `y_pred_{key}`
    kolon adları registry'den türer; `monitoring/schema.py`, `monitoring/scorecard.py`,
    `monitoring/postmortem.py`, `src/oof_feedback.py`'de hardcoded 4-model literal'ları tek kaynağa iner.
    Yeni model = manager + kayıt + config.
-4. **Kademeli ortaklaştırma (devam):** 05 → 01 → (03/04 değerlendirilecek); her adımda iki tenant'ta
+5. **Kademeli ortaklaştırma (devam):** 01 → (03/04 değerlendirilecek); her adımda iki tenant'ta
    birer koşu + çıktı diff'i sıfır olmadan ilerlenmez.
-5. **"Yeni EDAŞ ekleme tarifi"** `docs/RUNBOOK.md`'ye.
+6. **"Yeni EDAŞ ekleme tarifi"** `docs/RUNBOOK.md`'ye.
 
 ## FAZ 4 — Patron deliverable'ları: Excel + Diagnostic + LLM-export + Mail (2-3 gün) ❌ KAPSAM DIŞI
 

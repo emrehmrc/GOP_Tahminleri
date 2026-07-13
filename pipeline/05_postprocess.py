@@ -4,6 +4,10 @@
 Donmuş artefaktları yükleyip ham tahmine uygular.
 Backtest'in _apply_final_postprocess() ile aynı mantık, tek-fold versiyonu.
 
+Faz 3 (2026-07-13): ensemble bias-correction bloğu ortak src/postprocess_core.py'ye
+taşındı (GDZ ile aynı mantık). Holiday substitution + PV bias ADM'ye özgü katmanlar
+olarak burada kalıyor (GDZ'de karşılığı yok).
+
 Giriş:  data/weather_cache/raw_predictions.parquet
          data/weather_cache/feature_matrix.parquet  (context için)
          models/holiday_blend_alphas*.json
@@ -34,6 +38,7 @@ from config_live import (
     ENSEMBLE_BIAS_WEEKEND_SCALE_T1, ENSEMBLE_BIAS_WEEKEND_SCALE_T2,
     ENSEMBLE_BIAS_SUNDAY_SCALE_T1, ENSEMBLE_BIAS_SUNDAY_SCALE_T2,
 )
+from src.postprocess_core import apply_ensemble_bias_correction
 
 FEATURE_MATRIX_PATH    = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
 RAW_PREDICTIONS_PATH   = DATA_DIR / "weather_cache" / "raw_predictions.parquet"
@@ -157,24 +162,19 @@ def run() -> dict:
     pre_mean = float(preds.mean())
 
     # ── Ensemble bias düzeltme (sistematik under-estimation karşıtı) ──────────
-    # Gün-tipi duyarlı: hafta sonu yükleri düşük, bias over-correction riski var.
-    # Pazar < Cumartesi < Hafta içi bias scaling.
-    is_t2 = raw_preds_df["horizon_day"].to_numpy() == "T+2"
-    bias_arr = np.where(is_t2, ENSEMBLE_BIAS_CORRECTION_T2_MWH, ENSEMBLE_BIAS_CORRECTION_T1_MWH)
-
+    # Ortak çekirdek (src/postprocess_core.py) — GDZ ile aynı mantık.
     day_type = raw_preds_df["day_type"].to_numpy()
-    is_sunday = day_type == "pazar"
-    is_weekend = (day_type == "cumartesi") | is_sunday
-
-    scale_t1 = np.where(is_sunday, ENSEMBLE_BIAS_SUNDAY_SCALE_T1,
-                        np.where(is_weekend, ENSEMBLE_BIAS_WEEKEND_SCALE_T1, 1.0))
-    scale_t2 = np.where(is_sunday, ENSEMBLE_BIAS_SUNDAY_SCALE_T2,
-                        np.where(is_weekend, ENSEMBLE_BIAS_WEEKEND_SCALE_T2, 1.0))
-    bias_scale = np.where(is_t2, scale_t2, scale_t1)
-
-    bias_arr = bias_arr * bias_scale
-    preds = preds + bias_arr
-    bias_total = float(bias_arr.sum())
+    preds, bias_arr, bias_total = apply_ensemble_bias_correction(
+        preds,
+        raw_preds_df["horizon_day"].to_numpy(),
+        day_type,
+        t1_mwh=ENSEMBLE_BIAS_CORRECTION_T1_MWH,
+        t2_mwh=ENSEMBLE_BIAS_CORRECTION_T2_MWH,
+        weekend_scale_t1=ENSEMBLE_BIAS_WEEKEND_SCALE_T1,
+        weekend_scale_t2=ENSEMBLE_BIAS_WEEKEND_SCALE_T2,
+        sunday_scale_t1=ENSEMBLE_BIAS_SUNDAY_SCALE_T1,
+        sunday_scale_t2=ENSEMBLE_BIAS_SUNDAY_SCALE_T2,
+    )
 
     after_sub = preds
     if ENABLE_HOLIDAY_SUBSTITUTION:
