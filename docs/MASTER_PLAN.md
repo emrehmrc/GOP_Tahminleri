@@ -212,7 +212,21 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
      sorunu ayrı bir hipotez olarak ele alınmalı. actuals_log gap'i düzeltilince GDZ tarafında da AYNI
      eksik (07-11/07-12) bulundu ve aynı yöntemle backfill edildi (paylaşımlı `monitoring/forecast_logger.py`
      kodu sayesinde write-then-verify düzeltmesi otomatik olarak GDZ'yi de kapsıyor).
-3. ✅ **ADM: haftalık-profil vurgusu (lag168 hipotezi) — TEST EDİLDİ, REDDEDİLDİ** (2026-07-13):
+3. ✅ **ADM PV-bias postprocess hipotezi — TEST EDİLDİ, KARIŞIK/YETERSİZ KANIT, REDDEDİLDİ** (2026-07-13,
+   `experiments/adm_pv_bias_correction_ab.py`): `pv_bias_delta`'nın (month×hour×GHI-quartile donmuş
+   lookup, `src/pv_bias_correction.py`) katkısı gerçek üretim verisiyle (forecast_log_v zaten her run'da
+   `pv_bias_delta`'yı loglar — retrain/sandbox gerekmedi) ablation ile ölçüldü: `pred_no_pv = Final_Pred -
+   pv_bias_delta`. **Sonuç: net etki ihmal edilebilir ama TUTARSIZ** — pv-bloğunda genel +0.10pp (hafif
+   zararlı), ama gün bazında 07-06/07-07'de belirgin YARDIMCI (%7.6→%6.1), 07-08/07-09'da belirgin ZARARLI,
+   **07-12 Pazar'da (post-mortem'in odağı) ÇOK ZARARLI** (Final %7.02 vs ens_raw %5.07 — düzeltme
+   olmasaydı +1.95pp daha iyi olurdu), ama 07-05 Pazar'da neredeyse nötr. Sadece 2 Pazar örneği —
+   istatistiksel güç düşük. **Aynı hastalık:** donmuş/statik lookup, tıpkı reddedilen GDZ saatlik
+   bias-correction'da olduğu gibi genelleşmiyor. Kör `ENABLE_PV_BIAS_CORRECTION=False` bazı günleri
+   iyileştirip bazılarını kötüleştirir — **canlıya HİÇBİR DEĞİŞİKLİK ALINMADI** (governance: net kazanç
+   kanıtlanamadı). Rapor: `output/analysis/ensemble_ab_adm_pv_bias_2026-07-13.md` (git-ignored). **Öneri
+   (uygulanmadı):** statik lookup yerine 2c'deki rolling/adaptif yaklaşımın PV-bloğu varyantı, ya da
+   lookup'ın fit kalitesi (örnek sayısı/tazeliği) denetlenmeli.
+4. ✅ **ADM: haftalık-profil vurgusu (lag168 hipotezi) — TEST EDİLDİ, REDDEDİLDİ** (2026-07-13):
    - Feature importance (ADM XGB weekend/Sunday modeli, `models/live_xgboost_we.json`): `Lag24h` en
      önemli feature (2.44M gain), `Lag168h` çok daha düşük (9. sırada, 222K gain) — model Pazar'ı
      tahmin ederken Cumartesi'nin (dün) desenine geçen Pazar'dan daha çok güveniyor. Bu, "haftalık
@@ -232,7 +246,7 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
      rafa kaldırıldı — kanıt yok.
    - GDZ akşam-piki + sabah-ramp analizi (aşağıdaki madde) tamamlandı; ADM tarafında Pazar sorunu için
      başka bir hipotez (örn. gerçek 07-12 post-mortem'i actuals_log dolunca) gerekebilir.
-4. ✅ **GDZ: akşam piki + gece profili — rezidüel bias ölçüldü** (2026-07-13, 2a-2 aracıyla):
+5. ✅ **GDZ: akşam piki + gece profili — rezidüel bias ölçüldü** (2026-07-13, 2a-2 aracıyla):
    `model_segment_breakdown` ile 10 günlük ME (bias) kırılımı: **evening + night** bloklarında TÜM
    gün tiplerinde sistematik **under-forecast** (ME −75 ile −215 MWh arası), **morning** bloğunda ise
    güçlü **over-forecast** (+67 ile +307 MWh). Bu akşam-piki bulgusunu doğruluyor VE önceden
@@ -247,7 +261,7 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
    `output/analysis/ensemble_ab_gdz_ramp_bias_2026-07-13.md` (GDZ tarafında, git-ignored).
    **Ders:** statik düzeltme yerine 2c'deki rolling/adaptif yaklaşım (EWA/rolling-30g) muhtemelen
    doğru çözüm — bu bulgu 2c'nin önceliğini artırıyor.
-5. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
+6. **Tenant feature profili altyapısı:** feature seti/vurguları TenantConfig'ten yönetilebilir hale
    gelir (ADM=haftalık profil ağırlıklı, GDZ=hava ağırlıklı) — Faz 3'teki multi-tenant işinin öncüsü.
 
 ### 2c. Learning ensemble (son 30 günden öğrenen) 🔶 kısmen (2026-07-13)
