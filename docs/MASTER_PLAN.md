@@ -7,8 +7,8 @@
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
 | 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
 | 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | 🔶 sürüyor 2026-07-13 (2a+2b tamam, 2c kısmen — segment ağırlık scaffolding, canlı bağlantı OOF verisi birikince) |
-| 3 | Multi-tenant çekirdek | ⬜ |
-| 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ⬜ |
+| 3 | Multi-tenant çekirdek | 🔶 sürüyor 2026-07-13 (07/08 zaten ortaktı, doğrulandı; 06 ortaklaştırıldı) |
+| 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ❌ kapsam dışı (2026-07-13, Emre yapacak) |
 | 5 | Hijyen + dokümantasyon | ⬜ |
 | 6 | Otomasyon | ⬜ |
 
@@ -311,17 +311,41 @@ Planın kalbi. Dosyalar: `src/oof_feedback.py`, `pipeline/04_predict_48h.py`, `p
 
 ## FAZ 3 — Multi-tenant çekirdek: "yeni EDAŞ = 1 config" (3-5 gün, kademeli)
 
-1. **TenantConfig genişletme:** istasyonlar, hedef kolon, ağırlık/bias sabitleri, path'ler, HPO
-   paramları, frozen artefact'lar, (2b-4) feature profili.
-2. **Model registry:** `MODELS = {"xgb": ..., "lgbm": ..., "cat": ..., "chronos": ...}`; `y_pred_{key}`
-   kolon adları registry'den türer; şu an 6-8 yerdeki hardcoded literal tek kaynağa iner
-   (04_predict, forecast_logger, oof_feedback, scorecard, schema). Yeni model = manager + kayıt + config.
-3. **Kademeli ortaklaştırma:** 08 (ortak) → 07 → 06/05 → 03 → 04 → 01/02; her adımda iki tenant'ta
-   birer koşu + çıktı diff'i sıfır olmadan ilerlenmez; sonunda `gdz talep/live` = config + data + models;
-   subprocess izolasyonu korunur.
-4. **"Yeni EDAŞ ekleme tarifi"** `docs/RUNBOOK.md`'ye.
+**Kapsam güncellemesi (2026-07-13):** Faz 4 tamamen kapsam dışı bırakıldı (Emre yapacak) — Faz 3'ün odağı
+sadece backend pipeline ortaklaştırması.
 
-## FAZ 4 — Patron deliverable'ları: Excel + Diagnostic + LLM-export + Mail (2-3 gün)
+**Ön araştırma bulgusu (2026-07-13):** planın önerdiği sıra (08→07→06/05→03→04→01/02) gerçek diff
+büyüklükleriyle uyuşmuyordu — 08 (`src/diagnostic_core.py`, 2026-07-10'da yapılmış) ve **07
+(`pipeline/07_report_excel.py`) zaten fiilen ortaktı** (tek dosya, GDZ için `sys.path` + kolon-rename
+normalizasyonuyla ADM master'ının yanına GDZ master'ını da işliyor — ayrı GDZ dosyası hiç yok). Revize
+sıra: 07/08 doğrula → **06 (kolay-orta)** → 05 (kolay, bias-correction bloğu zaten ortak) → 01 (orta-zor,
+GDZ'de eksik atomic-write + data_quality/OOF entegrasyonu önce taşınmalı) → 03/04 (bilinen ~%100 diff,
+en zor, muhtemelen en sona/ayrı bırakılacak).
+
+1. ✅ **06 (deliver) ortaklaştırıldı (2026-07-13):** `src/deliver_core.py` (yeni, `diagnostic_core.py` ile
+   aynı desen — ortak çekirdek + ince tenant kabuğu) — sanity-check + excel yazımı + arşivleme tek
+   kaynağa indirildi. T+2 SEÇİM STRATEJİSİ kasıtlı olarak ortaklaştırılMADI (ADM: tarih filtresi + boşsa
+   48h fallback; GDZ: `horizon_day` kolon filtresi + boşsa raise — davranış farkı var, kanıtsız
+   birleştirme governance'a aykırı olurdu), her tenant kendi `_select_t2()` closure'ını çekirdeğe geçiriyor.
+   `pipeline/06_deliver.py` (ADM) ve `gdz talep/live/pipeline/06_deliver.py` artık ince kabuk.
+   **Diff=0 doğrulaması:** eski/yeni kod izole scratch dizinlerine (gerçek `DELIVERY_ROOT`/`ARCHIVE_DIR`'a
+   dokunmadan) aynı gerçek `postprocessed_predictions.parquet` ile koşturuldu, ADM+GDZ ikisinde de
+   `output_df.equals()` ve dönüş sözlüğü birebir eşleşti. `pytest tests/` 67/67 yeşil (davranış değişmedi,
+   06_deliver.py'ye özel test yok).
+2. **TenantConfig genişletme:** istasyonlar, hedef kolon, ağırlık/bias sabitleri, path'ler, HPO
+   paramları, frozen artefact'lar, (2b-4) feature profili.
+3. **Model registry:** `MODELS = {"xgb": ..., "lgbm": ..., "cat": ..., "chronos": ...}`; `y_pred_{key}`
+   kolon adları registry'den türer; `monitoring/schema.py`, `monitoring/scorecard.py`,
+   `monitoring/postmortem.py`, `src/oof_feedback.py`'de hardcoded 4-model literal'ları tek kaynağa iner.
+   Yeni model = manager + kayıt + config.
+4. **Kademeli ortaklaştırma (devam):** 05 → 01 → (03/04 değerlendirilecek); her adımda iki tenant'ta
+   birer koşu + çıktı diff'i sıfır olmadan ilerlenmez.
+5. **"Yeni EDAŞ ekleme tarifi"** `docs/RUNBOOK.md`'ye.
+
+## FAZ 4 — Patron deliverable'ları: Excel + Diagnostic + LLM-export + Mail (2-3 gün) ❌ KAPSAM DIŞI
+
+**2026-07-13 kullanıcı kararı: bu faz tamamen kapsam dışı — Emre yapacak.** Aşağıdaki içerik sadece
+tarihi referans için tutuluyor, bu backend oturumlarında uygulanmayacak.
 
 ### 4a. STLF_LIVE_RAPOR.xlsx (`pipeline/07_report_excel.py`)
 - Tam tarihçe, sağa büyüyen (kaynak: `output/archive/` + forecast_log; flat xlsx bağımlılığı kalkar).
