@@ -17,6 +17,7 @@ import pandas as pd, numpy as np
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 import config_live as C
+from src.output_paths import resolve_output_file
 import asof_regen as AR
 
 
@@ -56,7 +57,7 @@ if __name__ == "__main__":
         for t in targets:
             try:
                 res = AR.regen_one(t)  # full as-of pipeline; REGEN dosyası yazar
-                regen = pd.read_excel(C.OUTPUT_DIR / f"{t}_forecast_REGEN.xlsx",
+                regen = pd.read_excel(resolve_output_file(C.OUTPUT_DIR, f"{t}_forecast_REGEN.xlsx"),
                                       sheet_name="Tahmin").set_index("Saat")["Tahmin_MWh"]
                 act = _actual_series(master, t)
                 rows.append({"target": t, "T+2_MAPE": round(_mape(regen, act), 2),

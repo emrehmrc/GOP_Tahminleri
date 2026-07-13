@@ -418,6 +418,22 @@ def stack_predictions(preds: dict, predict_idx, chronos_ok: bool = True) -> tupl
     else:
         print("     [Stacker] Chronos çöktü — Rolling Ridge atlandı (kirli sinyal riski)")
 
+    # 1b. Inverse-MAPE weights (OOF, Rolling Ridge yokken guncel model skill'i ile
+    #     adaptif agirlik — statik weight'lerden daha iyi, Ridge'den daha guvenli).
+    try:
+        from src.oof_feedback import get_inverse_mape_weights
+        imape = get_inverse_mape_weights(OOF_HISTORY_PATH, pred_cols)
+        if imape is not None:
+            calib_cols = list(imape.keys())
+            if all(c in pred_df.columns for c in calib_cols):
+                ensemble = sum(pred_df[c] * w for c, w in imape.items())
+                method = "inverse_mape" if chronos_ok else "inverse_mape_no_chronos"
+                meta = _weights_meta(calib_cols, [imape[c] for c in calib_cols])
+                print(f"     [Stacker] Inverse-MAPE adaptive: { {k: round(v, 3) for k, v in imape.items()} }")
+                return pd.Series(ensemble, index=predict_idx), method, meta
+    except Exception as e:
+        print(f"     [Stacker] Inverse-MAPE yok: {e}")
+
     # 2. Kalibre edilmiş statik ağırlık (bkz. config_live.CALIBRATED_ENSEMBLE_WEIGHTS
     #    docstring'i — as-of backtest + LOO doğrulama). Rolling Ridge henüz yeterli
     #    TEMİZ veri biriktirmediği sürece varsayılan köprü budur.

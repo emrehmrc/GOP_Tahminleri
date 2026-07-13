@@ -33,31 +33,45 @@ from config_live import (
 FEATURE_MATRIX_PATH = DATA_DIR / "weather_cache" / "feature_matrix.parquet"
 
 
-@contextlib.contextmanager
-def _suppress_dropna():
-    """DataManager.load_and_preprocess() sonunda `df.dropna(inplace=True)`
-    cagiriyor — bu, hedefi NaN olan (bizim tahmin penceremiz) satirlari
-    TAMAMEN siliyor. Patch: SADECE training row'lardaki NaN'lari temizle,
-    forecast row'lara (target=NaN) dokunma.
+# Gercek pandas dropna'yi patch'ten ONCE yakala. _smart_dropna_patch icinde
+# `training.dropna(...)` cagirmak, pd.DataFrame.dropna patchlenmisken kendi
+# kendini sonsuz cagirir (forecast_mask training uzerinde hep bos cikar) —
+# her frame df'i kopyaladigi icin bu da MemoryError'a kadar gider.
+_ORIGINAL_DROPNA = pd.DataFrame.dropna
+
+
+def _smart_dropna_patch(df: pd.DataFrame, *args, **kwargs) -> pd.DataFrame:
+    """DataManager.dropna(inplace=True) icin akilli NaN temizleme.
+
+    DataManager.load_and_preprocess() sonunda `df.dropna(inplace=True)` cagirir.
+    Bu, hedefi (RAW_TARGET_COL) NaN olan tahmin penceresi satirlarini da siler.
+
+    Patch (pd.DataFrame.dropna uzerinde): SADECE training (target dolu) row'lardaki
+    NaN'lari temizle, forecast (target=NaN) row'lara dokunma.
+
+    Daha temiz bir cozum DataManager'in refactor'unu gerektirir; bu patch
+    production'da kanitlanmis ve test altindadir (tests/test_pipeline_core.py).
     """
     from config_live import RAW_TARGET_COL
+    if RAW_TARGET_COL not in df.columns:
+        return _ORIGINAL_DROPNA(df, *args, **{k: v for k, v in kwargs.items() if k != "inplace"})
+    forecast_mask = df[RAW_TARGET_COL].isna()
+    forecast_rows = df[forecast_mask].copy()
+    training = df[~forecast_mask]
+    clean_kwargs = {k: v for k, v in kwargs.items() if k != "inplace"}
+    training_clean = _ORIGINAL_DROPNA(training, *args, **clean_kwargs)
+    result = pd.concat([training_clean, forecast_rows]).sort_index()
+    if kwargs.get("inplace"):
+        df._update_inplace(result)
+        return None
+    return result
+
+
+@contextlib.contextmanager
+def _suppress_dropna():
+    """_smart_dropna_patch'i pd.DataFrame.dropna'ya uygula."""
     original = pd.DataFrame.dropna
-
-    def _smart_dropna(self, *args, **kwargs):
-        if RAW_TARGET_COL not in self.columns:
-            return original(self, *args, **kwargs)
-        forecast_mask = self[RAW_TARGET_COL].isna()
-        forecast_rows = self[forecast_mask].copy()
-        training = self[~forecast_mask]
-        clean_kwargs = {k: v for k, v in kwargs.items() if k != "inplace"}
-        training_clean = original(training, *args, **clean_kwargs)
-        result = pd.concat([training_clean, forecast_rows]).sort_index()
-        if kwargs.get("inplace"):
-            self._update_inplace(result)
-            return None
-        return result
-
-    pd.DataFrame.dropna = _smart_dropna
+    pd.DataFrame.dropna = _smart_dropna_patch
     try:
         yield
     finally:

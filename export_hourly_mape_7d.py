@@ -12,6 +12,7 @@ import duckdb
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 import config_live as C
+from src.output_paths import date_folder
 from src import forecast_logger as FL
 
 FL.rebuild_duckdb_views()
@@ -75,7 +76,8 @@ for (d, hz), g in df.groupby(["target_date", "horizon_day"]):
 
 # ── yaz ──────────────────────────────────────────────────────────────────────
 stamp = date.today().isoformat()
-xlsx = C.OUTPUT_DIR / f"hourly_mape_7d_{stamp}.xlsx"
+dated_dir = date_folder(C.OUTPUT_DIR, stamp, create=True)
+xlsx = dated_dir / f"hourly_mape_7d_{stamp}.xlsx"
 with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
     summ.round(2).to_excel(xw, sheet_name="OZET_gun_model", index=False)
     long_df.round(2).to_excel(xw, sheet_name="saat_saat_uzun", index=False)
@@ -83,8 +85,8 @@ with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
         piv.to_excel(xw, sheet_name=("APE_" + name.replace("+", ""))[:31])
 
 # CSV'ler (Excel açamayan için)
-summ.round(2).to_csv(C.OUTPUT_DIR / f"hourly_mape_7d_OZET_{stamp}.csv", index=False)
-long_df.round(2).to_csv(C.OUTPUT_DIR / f"hourly_mape_7d_saat_saat_{stamp}.csv", index=False)
+summ.round(2).to_csv(dated_dir / f"hourly_mape_7d_OZET_{stamp}.csv", index=False)
+long_df.round(2).to_csv(dated_dir / f"hourly_mape_7d_saat_saat_{stamp}.csv", index=False)
 
 # ── ekrana bas ───────────────────────────────────────────────────────────────
 pd.set_option("display.width", 220); pd.set_option("display.max_rows", 60); pd.set_option("display.max_columns", 40)

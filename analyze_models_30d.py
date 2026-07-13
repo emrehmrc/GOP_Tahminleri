@@ -168,6 +168,24 @@ def analyze_worst_combined(merged, cols):
     return worst
 
 
+def analyze_by_temp(merged, cols):
+    """Sicaklik bandina gore MAPE (wx_temp_fcst)."""
+    if "wx_temp_fcst" not in merged.columns:
+        return None
+    rows = []
+    for label, cond in [("serin (<20C)", merged["wx_temp_fcst"] < 20),
+                         ("orta (20-28C)", (merged["wx_temp_fcst"] >= 20) & (merged["wx_temp_fcst"] <= 28)),
+                         ("sicak (>28C)", merged["wx_temp_fcst"] > 28)]:
+        df_seg = merged[cond]
+        row = {"sicaklik": label, "n_hours": len(df_seg)}
+        for col in cols:
+            if col in df_seg.columns:
+                row[f"{col}_MAPE"] = mape_of(df_seg[col], df_seg["Actual_MWh"])
+                row[f"{col}_ME"] = round(float(df_seg[f"Error_{col}"].mean()), 1)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def analyze_correlation(merged, cols):
     """Model hatalari arasinda korelasyon — birlikte mi siciyorlar?"""
     error_cols = [f"Error_{c}" for c in cols if f"Error_{c}" in merged.columns]
@@ -209,6 +227,14 @@ def detect_patterns(merged, cols):
                 findings.append(f"  ⚠  Yuksek GHI (>400) saatlerinde MAPE={hi_ghi.mean():.1f}% (genel ort {ape.mean():.1f}%)")
             if len(lo_ghi) > 20 and lo_ghi.mean() > ape.mean() * 1.3:
                 findings.append(f"  ⚠  GHI=0 (gece) saatlerinde MAPE={lo_ghi.mean():.1f}% (genel ort {ape.mean():.1f}%)")
+
+        # 3b. Sicaklik etkisi
+        if "wx_temp_fcst" in merged.columns:
+            for label, cond, thr in [("sicak (>28C)", merged["wx_temp_fcst"] > 28, 1.3),
+                                      ("serin (<15C)", merged["wx_temp_fcst"] < 15, 1.3)]:
+                seg = merged[cond][ap_col] if cond.any() else pd.Series(dtype=float)
+                if len(seg) > 10 and seg.mean() > ape.mean() * thr:
+                    findings.append(f"  ⚠  '{label}' saatlerinde MAPE={seg.mean():.1f}% (genel ort {ape.mean():.1f}%)")
 
         # 4. Sistematik bias
         err = merged[f"Error_{col}"]
@@ -289,6 +315,14 @@ if __name__ == "__main__":
     print("  5. GUNESLI / GUNESSIZ SAAT KIRILIMI")
     print("─" * 70)
     print(solar.to_string(index=False))
+
+    # ── 5b. SICAKLIK BANDINA GORE ────────────────────────────────────────────
+    temp_seg = analyze_by_temp(merged, available_cols)
+    if temp_seg is not None:
+        print("\n" + "─" * 70)
+        print("  5b. SICAKLIK BANDINA GORE PERFORMANS")
+        print("─" * 70)
+        print(temp_seg.to_string(index=False))
 
     # ── 6. KORELASYON ──────────────────────────────────────────────────────
     corr = analyze_correlation(merged, available_cols)

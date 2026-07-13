@@ -15,11 +15,12 @@ import pandas as pd, numpy as np
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "src"))
 import config_live as C
+from src.output_paths import resolve_output_file
 import asof_regen as AR
 
 # ── utils ──────────────────────────────────────────────────────────────────────
 def _models_exist(target_date: str) -> bool:
-    return (C.OUTPUT_DIR / f"{target_date}_models_REGEN.parquet").exists()
+    return resolve_output_file(C.OUTPUT_DIR, f"{target_date}_models_REGEN.parquet").exists()
 
 def _regenerate_one(target_date: str) -> dict:
     try:
@@ -63,7 +64,7 @@ if __name__ == "__main__":
             result = _regenerate_one(t)
             if result["status"] == "ok":
                 # MAPE hesapla
-                regen_models = pd.read_parquet(C.OUTPUT_DIR / f"{t}_models_REGEN.parquet")
+                regen_models = pd.read_parquet(resolve_output_file(C.OUTPUT_DIR, f"{t}_models_REGEN.parquet"))
                 regen_models["Datetime"] = pd.to_datetime(regen_models["Datetime"])
                 tgt_date = pd.Timestamp(t).date()
                 t2 = regen_models[regen_models["Datetime"].dt.date == tgt_date]

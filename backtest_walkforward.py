@@ -54,10 +54,8 @@ def walkforward_backtest(start_date: str = "2026-07-01", end_date: str = "2026-0
 
     print(f"Uretilecek: {len(todo)} gun  ({todo[0]}..{todo[-1]})")
 
-    # Tek backup (tum gunler icin)
-    AR._backup()
-    print(f"[yedek] {AR.BACKUP}")
-
+    # AR.regen_one() artik tamamen sandbox'li (bkz. asof_regen.py docstring) —
+    # canli dosyalara hic dokunmadigi icin ayrica backup/restore gerekmiyor.
     # Run context yedegi (04_predict cagiriyor — LIVE_FILES icinde degil)
     ctx_bak = None
     if C.RUN_CONTEXT_PATH.exists():
@@ -94,7 +92,16 @@ def walkforward_backtest(start_date: str = "2026-07-01", end_date: str = "2026-0
                 result = AR.regen_one(t)
                 # regen_one exception firlatmazsa basarilidir (return dict'indeki
                 # "status" anahtarina guvenilmez — hata durumunda exception atar)
-                fc_result = write_forecast_log(ctx)
+                # ONEMLI: postproc_path/meta_path acikca verilmezse write_forecast_log()
+                # GERCEK (bu regen'le ilgisiz, bayat) canli postproc/meta'yi okur —
+                # regen_one() sandbox'tan bu run'a ait *_REGEN dosyalarini kopyaliyor,
+                # onlari kullanmaliyiz (bkz. asof_regen.py:regen_one).
+                fc_result = write_forecast_log(
+                    ctx,
+                    postproc_path=Path(result["models_path"]) if result.get("models_path") else None,
+                    meta_path=Path(result["meta_path"]) if result.get("meta_path") else None,
+                    source="backfill",
+                )
                 n_rows = fc_result.get("rows", 0)
                 print(f"       forecast_log: {fc_result.get('status')} ({n_rows} satir)")
                 results.append({"target": t, "status": "ok", "forecast_log_rows": n_rows})
@@ -105,15 +112,15 @@ def walkforward_backtest(start_date: str = "2026-07-01", end_date: str = "2026-0
                 results.append({"target": t, "status": "error", "error": str(e)[:200]})
 
     finally:
-        AR._restore()
-        # Restore orijinal run_context.json
+        # Restore orijinal run_context.json (bu script'in dogrudan yazdigi tek
+        # canli dosya — 04_predict'in kendi get_run_context()'i icin gerekli).
         if ctx_bak is not None:
             C.RUN_CONTEXT_PATH.write_text(
                 json.dumps(ctx_bak, ensure_ascii=False, indent=2), encoding="utf-8"
             )
         elif C.RUN_CONTEXT_PATH.exists():
             C.RUN_CONTEXT_PATH.unlink()
-        print(f"\n[geri yukle] canli durum restore edildi")
+        print(f"\n[geri yukle] run_context.json restore edildi")
 
     # Ozet
     ok_cnt = sum(1 for r in results if r["status"] == "ok")
