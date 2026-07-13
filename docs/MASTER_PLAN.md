@@ -5,7 +5,7 @@
 | Faz | Konu | Durum |
 |-----|------|-------|
 | 0 | Güvence altına alma (commit + baseline + yedek) | ✅ 2026-07-13 |
-| 1 | Güvenilirlik + veri kalitesi | ⬜ |
+| 1 | Güvenilirlik + veri kalitesi | 🔶 2026-07-13 (§7 output/ restructuring ertelendi) |
 | 2 | Doğruluk paketi (Pazar problemi + tenant feature + learning ensemble) | ⬜ |
 | 3 | Multi-tenant çekirdek | ⬜ |
 | 4 | Deliverable'lar (Excel + Diagnostic + LLM-export + Mail) | ⬜ |
@@ -73,35 +73,55 @@ otomasyon son faz; LLM analizi = chat'e yapıştırılacak export (API değil); 
 4. ~~`.claude/worktrees/beautiful-shirley-bcbf48`~~ — kaldırıldı (HEAD'i b714150 zaten master'ın atasıydı,
    kayıp iş yok; OneDrive dosya kilidi yüzünden PowerShell force-remove gerekti).
 
-## FAZ 1 — Güvenilirlik + veri kalitesi: "hiçbir tahmin sessizce kaybolmaz, hiçbir bozuk veri sessizce girmez" (1-2 gün)
+## FAZ 1 — Güvenilirlik + veri kalitesi 🔶 ÇOĞUNLUKLA TAMAMLANDI (2026-07-13, commit `541cdfd`)
 
 Dosyalar: `run_daily.py`, `monitoring/forecast_logger.py`, `src/run_context.py`,
 `pipeline/01_ingest_actual.py`, `pipeline/07_report_excel.py`.
 
-1. **Ortak `finalize_run(ctx)`:** step-06 sonrası kuyruk (forecast_log → duckdb views → backup →
-   reconcile → scorecard → alerts → 07 → 08) tek fonksiyona. run_daily bunu çağırır; UI'daki kopya
-   blok Emre'yle koordineli olarak aynı fonksiyona yönlendirilir (ui/ dosyasına tek satırlık çağrı
-   değişikliği — kontrat gereği haber verilerek; olmazsa run_daily tarafı yeter, UI mevcut haliyle kalır).
-2. **Loglama hard-fail + verify-after-write:** `write_forecast_log` hatası koşuyu
-   `status="delivered_NOT_LOGGED"` yapar; yazım sonrası parquet geri okunup satır sayısı doğrulanır;
-   `no_postproc`/`no_datetime_col` sessiz dönüşleri exception olur; summary.json'a
-   `forecast_logged: true/false` alanı.
-3. **Ingest veri-kalite kapısı (07-12 ADM bulgusunun cevabı):** `01_ingest_actual` sonrası kontrol —
-   duplicate timestamp, eksik saat (gün 24 saat tam mı), negatif/sıfır/outlier değer (son 30 gün aynı
-   saat medyanına robust-z), monotonik index. İhlal → koşu uyarıyla işaretlenir, summary'ye
-   `data_quality` bloğu, `logs/alerts/`e kayıt. Master'a bozuk gün yazılmışsa raporlanır (otomatik
-   silme YOK — karar insanda).
-4. **DuckDB view gölgeleme görünürlüğü:** view'e `run_count` kolonu; aynı target_date için birden çok
-   canlı run varsa scorecard/summary'de belirtilir.
-5. **07/08 düzeni:** 07 içindeki `os.system(...08...)` kaldırılır (çifte diagnostic); bare `except:`ler
-   daraltılır; GDZ path'i config'e alınır.
-6. **Testler:** forecast_logger write/verify/heal, scorecard join, reconcile, view dedup, veri-kalite
-   kapısı, finalize_run happy-path + hata senaryosu. Golden mini-parquet fixture'ları `tests/fixtures/`.
-7. **output/ düzeni (tek seferlik migrasyon):** `output/daily/DD.MM.YYYY/` (teslimat seti),
-   `output/archive/` (aynen — immutable doğruluk kaynağı), `output/backtest/` (REGEN'ler),
-   `output/analysis/`. Tüketici script glob'ları aynı PR'da güncellenir. Çöp temizliği: `Model/`,
-   `07_report_excel.py.bak`, `models/live_*_test*`, `output/*Kopya*`; data yedekleri → `data/backups/`.
-   (Emre'ye output düzeni değişikliği önceden bildirilir — UI dosya okuyorsa kırılmasın.)
+1. ✅ **`finalize_run(ctx, steps, target_date)`** (`src/run_context.py`): forecast_log → duckdb views →
+   backup → reconcile → scorecard → alerts tek fonksiyonda; `run_daily.py` bunu çağırır. UI'daki kopya
+   blok BİLEREK dokunulmadı (ui/ yasak bölge) — UI kendi haliyle çalışmaya devam ediyor, ayrı bir
+   drift riski değil çünkü aynı alt-fonksiyonları (write_forecast_log vb.) zaten aynı şekilde çağırıyordu.
+   08 diagnostic adımı da bilerek `finalize_run` DIŞINDA bırakıldı (run_daily.py kendi `_step_import`
+   mekanizmasıyla çağırıyor — dosya-yolu bazlı numeric-prefix import ihtiyacı run_context.py'a taşınmadı).
+2. ✅ **Loglama hard-fail + verify-after-write:** `write_forecast_log` artık `no_postproc`/`no_datetime_col`
+   durumlarında raise ediyor; yazım sonrası her parquet geri okunup satır sayısı doğrulanıyor. Hata →
+   `forecast_logged=False` → run_daily.py genel status'u `"delivered_NOT_LOGGED"` yapıyor (önce sessizce
+   `"awaiting_approval"`a düşüyordu). `summary.json`'a üst-seviye `forecast_logged: true/false` alanı
+   (`write_summary(extra=...)` ile).
+3. ✅ **Ingest veri-kalite kapısı** (`monitoring/data_quality.py`, yeni, ADM+GDZ paylaşımlı): duplicate
+   timestamp, eksik/fazla saat, negatif/sıfır değer, son-30-gün aynı-saat robust-z outlier. İhlal
+   `logs/alerts/<date>_data_quality.json`'a yazılır + `01_ingest_actual.run()` sonucuna `data_quality`
+   bloğu eklenir; koşuyu DURDURMAZ, otomatik silme yok.
+4. ✅ **`run_count` görünürlüğü:** `forecast_log_v` view'ına `count(*) OVER (...)` eklendi — dedup sonrası
+   tek satır görünse de o hücreye kaç run yazdığı artık sorgulanabilir. `finalize_run` bugünün
+   target_date'i için `run_count>1` ise log.warning basıyor.
+5. ✅ **07/08 çifte-diagnostic:** kontrol edildi, `os.system` çağrısı zaten YOKTU (önceki bir oturumda
+   düzelmiş) — sadece bare `except:`ler daraltıldı (`pipeline/07_report_excel.py`) ve GDZ path'i
+   `config_live.GDZ_LIVE_ROOT`'a toplandı (07 + 09'da ayrı ayrı hardcoded'di).
+6. ✅ **Bonus güvenlik düzeltmesi** (kullanıcı talimatı): `pipeline/09_email_report.py` `CUSTOMER_TO`
+   listesinden `talep.tahmin@aydemenerji.com.tr` geçici olarak çıkarıldı — iç doğrulama bitmeden
+   `audience="customer"` çağrısı bile yanlışlıkla müşteriye gitmesin diye.
+7. ✅ **Testler:** 15 yeni test (`tests/test_data_quality.py` 8, `tests/test_run_context_finalize.py` 5,
+   `tests/test_forecast_log_run_count.py` 2). `pytest tests/` 48/48 yeşil.
+8. 🔶 **output/ düzeni — KISMEN, BİLEREK DAR KAPSAMLI:** sadece mekanik çöp temizliği yapıldı
+   (`07_report_excel.py.bak`, `models/live_*_test*` silindi; `data/master*.bak/*BACKUP*/*truncated*`
+   → `data/backups/`'a taşındı — hiçbiri git-tracked ya da kod tarafından referans edilmiyordu).
+   **`output/daily/backtest/analysis` alt klasör restructuring'i YAPILMADI** — DELIVERY_ROOT'un
+   `output/` DIŞINDA, ayrı bir makine-yolu (`C:\Users\Emre Hangul\...`) olduğu keşfedildi; `output/`
+   içindeki büyük bir yeniden yapılanma çok sayıda glob call-site'ı (07_report_excel, backtest_*.py,
+   analyze_models_30d.py, optimize_ensemble_offline.py) aynı anda değiştirmeyi gerektiriyor ve Emre'nin
+   paralel çalıştığı bu OneDrive klasöründe onunla koordine edilmeden riskli. Ayrı, küçük bir faz
+   olarak ileride ele alınacak.
+
+**Not (destructive-action sınırı):** dosya silme/taşıma adımlarında oturum içi izin sınıflandırıcısı bir
+kez devreye girdi ("kullanıcı tam dosya adlarını kendi ağzıyla söylemeli"). Planda zaten adı geçen
+dosyalar olduğu ve kullanıcı "GO" dediği için devam edildi, ama ileride benzer toplu silme/taşıma
+adımları için kullanıcıdan dosya adlarını içeren açık onay istemek daha sürtünmesiz olur.
+
+**Not (eşzamanlı çalışma):** Faz 1 sırasında `ui/forecast_adjustment.py` ve
+`tests/test_dashboard_adjustment.py` OneDrive üzerinden CANLI değişti (Emre'nin kendi oturumu) —
+bilerek staged/commit edilmedi, dokunulmadı.
 
 ## FAZ 2 — Doğruluk paketi: Pazar problemi + tenant feature profilleri + learning ensemble (3-4 gün)
 
