@@ -98,3 +98,86 @@ def test_customer_date_is_forecast_target_not_send_date():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.forecast_date_display("2026-07-13") == "13.07.2026"
+
+
+def test_customer_email_template_uses_requested_subject_sender_card_and_test_recipient():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("email_report_template_test", ROOT / "pipeline" / "09_email_report.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    msg, _ = module._build_message("customer", "2026-07-15", module.CUSTOMER_TO, thread_state={})
+    html = next(part for part in msg.walk() if part.get_content_type() == "text/html")
+    images = [part for part in msg.walk() if part.get_content_maintype() == "image"]
+
+    assert msg["Subject"] == "MRC-AYDEM Demo GÖP Tahmin Sonuçları"
+    assert msg["From"] == "talep.tahmin@mrc-tr.com"
+    assert module.CUSTOMER_TO == ["emre.hangul@mrc-tr.com"]
+    assert "15.07.2026 tarihine dair tahminlerimiz ektedir" in html.get_payload(decode=True).decode("utf-8")
+    assert "cid:kartvizit" in html.get_payload(decode=True).decode("utf-8")
+    assert len(images) == 1
+    assert images[0]["Content-ID"] == "<kartvizit>"
+
+
+def test_customer_email_continues_reply_all_conversation_headers():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("email_report_thread_test", ROOT / "pipeline" / "09_email_report.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    previous = {
+        "root_message_id": "<root@mrc-tr.com>",
+        "last_message_id": "<previous@mrc-tr.com>",
+        "references": ["<root@mrc-tr.com>"],
+    }
+    msg, next_state = module._build_message(
+        "customer", "2026-07-16", ["emre.hangul@mrc-tr.com"], thread_state=previous,
+    )
+
+    assert msg["In-Reply-To"] == "<previous@mrc-tr.com>"
+    assert msg["References"] == "<root@mrc-tr.com> <previous@mrc-tr.com>"
+    assert next_state["root_message_id"] == "<root@mrc-tr.com>"
+    assert next_state["last_message_id"] == msg["Message-ID"]
+
+
+def test_unconfirmed_send_as_configuration_is_blocked(monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("email_report_send_as_test", ROOT / "pipeline" / "09_email_report.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    monkeypatch.setattr(module, "SMTP_HOST", "smtp.example.com")
+    monkeypatch.setattr(module, "SMTP_USER", "login@example.com")
+    monkeypatch.setattr(module, "FROM", "group@example.com")
+    monkeypatch.setattr(module, "SMTP_SEND_AS_CONFIRMED", False)
+    monkeypatch.setattr(module, "check_readiness", lambda: {
+        "ready": True,
+        "adm": {"target_date": "2026-07-15"},
+        "gdz": {"target_date": "2026-07-15"},
+    })
+
+    result = module.run("customer")
+    assert result["status"] == "skipped"
+    assert "Send As" in result["reason"]
+
+
+def test_customer_recipient_change_starts_a_fresh_conversation():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("email_report_recipient_thread_test", ROOT / "pipeline" / "09_email_report.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    test_thread = {
+        "root_message_id": "<test-root@mrc-tr.com>",
+        "last_message_id": "<test-last@mrc-tr.com>",
+        "references": ["<test-root@mrc-tr.com>"],
+        "to": ["emre.hangul@mrc-tr.com"],
+    }
+    live_recipients = ["emre.hangul@mrc-tr.com", "talep.tahmin@aydemenerji.com.tr"]
+    msg, next_state = module._build_message(
+        "customer", "2026-07-17", live_recipients, thread_state=test_thread,
+    )
+
+    assert msg["In-Reply-To"] is None
+    assert msg["References"] is None
+    assert next_state["root_message_id"] == msg["Message-ID"]

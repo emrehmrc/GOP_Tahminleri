@@ -42,6 +42,7 @@ Kullanım:
 from __future__ import annotations
 import sys
 import shutil
+import time
 import importlib.util
 from pathlib import Path
 import pandas as pd
@@ -54,6 +55,26 @@ import config_live as C
 from src.output_paths import dated_output_path
 
 SANDBOX = ROOT / "data" / "_asof_sandbox"   # git-ignored, tek kullanımlık izole alan
+
+
+def _rmtree_retry(path: Path, attempts: int = 8, delay_s: float = 1.5) -> None:
+    """shutil.rmtree wrapper — OneDrive senkron kilidi, klasör silme/oluşturma
+    hemen ardından WinError 5 (Erişim engellendi) fırlatabiliyor, bazen 15s+
+    sürebiliyor (2026-07-14 F1.A-cal koşusunda gözlemlendi — hem SANDBOX hem
+    SANDBOX/delivery/<ay> alt klasöründe, boş klasörler üzerinde). Artan backoff
+    ile yeniden dener; TÜM denemeler başarısız olursa BEST-EFFORT: hatayı
+    yutar, uyarı basar, devam eder — sandbox git-ignored/tek-kullanımlık
+    olduğu için bir sonraki mkdir(exist_ok=True) zaten üzerine yazar, artık
+    kalıntı dosyalar (varsa) çalışma doğruluğunu bozmaz, sadece disk çöpü."""
+    last_err: OSError | None = None
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as e:
+            last_err = e
+            time.sleep(delay_s * (i + 1))
+    print(f"     [uyari] sandbox temizligi basarisiz (OneDrive kilidi olasi), devam ediliyor: {last_err}")
 
 # Regen sırasında YAZILAN (mutasyona uğrayan) config_live nitelikleri — bunlar
 # sandbox'a yönlendirilir. Geri kalan her şey (frozen kalibrasyon, Chronos adapter,
@@ -86,7 +107,7 @@ def _enter_sandbox() -> None:
     regen sırasında GERÇEK müşteri klasörüne yazmasın diye — bkz. yukarıdaki
     GÜVENLİK notu)."""
     if SANDBOX.exists():
-        shutil.rmtree(SANDBOX)
+        _rmtree_retry(SANDBOX)
     for d in ["data/weather_cache", "models", "output/archive"]:
         (SANDBOX / d).mkdir(parents=True, exist_ok=True)
 
@@ -273,7 +294,7 @@ if __name__ == "__main__":
     for t in targets:
         results.append(regen_one(t))
     if SANDBOX.exists():
-        shutil.rmtree(SANDBOX)
+        _rmtree_retry(SANDBOX)
     print("\n=== REGEN SONUÇ ===")
     for r in results:
         print(r)
