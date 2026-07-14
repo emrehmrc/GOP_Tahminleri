@@ -22,14 +22,14 @@ def test_ai_recommendations_consider_all_hours_and_honor_limit():
     assert len(limited) == 9
 
 
-def test_ai_delta_is_bounded_at_250_and_low_history_is_visible():
+def test_ai_delta_is_bounded_at_300_and_low_history_is_visible():
     result = fa.build_recommendations({"REC": [
         _entry(17, exp=2000.0, n=60),
         _entry(18, exp=2000.0, n=10),
     ]})
-    assert fa.DEFAULT_MAX_AI_DELTA_MWH == 250.0
+    assert fa.DEFAULT_MAX_AI_DELTA_MWH == 300.0
     assert list(result["Saat"]) == [17, 18]
-    assert result["Değişim (MWh)"].eq(250.0).all()
+    assert result["Değişim (MWh)"].eq(300.0).all()
     assert result.set_index("Saat").loc[18, "Güven"] == "Düşük"
 
 
@@ -39,17 +39,17 @@ def test_small_in_band_gap_still_gets_a_recommendation():
     ]})
     assert isinstance(result, pd.DataFrame)
     assert len(result) == 1
-    assert float(result.iloc[0]["Değişim (MWh)"]) == 17.55
+    assert float(result.iloc[0]["Değişim (MWh)"]) == 25.35
 
 
-def test_delta_never_exceeds_250_mwh_in_either_direction():
+def test_delta_never_exceeds_300_mwh_in_either_direction():
     result = fa.build_recommendations({"REC": [
         _entry(5, fc=1000.0, exp=2000.0),
         _entry(6, fc=1000.0, exp=0.0),
     ]})
     changes = result.set_index("Saat")["Değişim (MWh)"]
-    assert changes.loc[5] == 250.0
-    assert changes.loc[6] == -250.0
+    assert changes.loc[5] == 300.0
+    assert changes.loc[6] == -300.0
 
 
 def test_preview_contains_confidence_explanation_and_old_new_values():

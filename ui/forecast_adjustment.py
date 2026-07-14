@@ -21,7 +21,7 @@ if str(GDZ_LIVE_DIR) not in sys.path:
     sys.path.insert(0, str(GDZ_LIVE_DIR))
 from config_live_gdz import OUTPUT_FILENAME_TEMPLATE as GDZ_FORECAST_TEMPLATE
 
-DEFAULT_MAX_AI_DELTA_MWH = 250.0
+DEFAULT_MAX_AI_DELTA_MWH = 300.0
 DEFAULT_MAX_AI_HOURS = 24
 
 
@@ -124,7 +124,7 @@ def build_recommendations(
         gap = float(exp) - float(fc)
         lo, hi = r.get("lo"), r.get("hi")
         outside = bool((lo is not None and fc < lo) or (hi is not None and fc > hi))
-        delta = float(np.clip(gap * 0.45, -float(max_delta_mwh), float(max_delta_mwh)))
+        delta = float(np.clip(gap * 0.65, -float(max_delta_mwh), float(max_delta_mwh)))
         proposed = float(fc) + delta
         n = int(r.get("n") or 0)
         confidence = r.get("confidence")
@@ -400,7 +400,7 @@ def render(target_date: str, customer_sent: bool = False) -> None:
         ))
     with p2:
         max_delta_mwh = float(st.number_input(
-            "Saatlik azami değişiklik (MWh)", min_value=10, max_value=250,
+            "Saatlik azami değişiklik (MWh)", min_value=10, max_value=300,
             value=int(DEFAULT_MAX_AI_DELTA_MWH), step=10,
         ))
     st.caption("Bu parametreler yalnızca öneri listesini sınırlar; hiçbir satır sizin checkbox onayınız olmadan uygulanmaz.")
